@@ -12,6 +12,41 @@ from datetime import datetime
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
+
+# --- Mobile & UX setup ---
+st.set_page_config(page_title="Stock Dashboard", page_icon="📈", layout="wide")
+
+# Compact / Mobile toggle in sidebar
+compact = st.sidebar.toggle("📱 Compact mobile layout", value=True)
+
+# Global CSS for mobile responsiveness
+st.markdown("""
+<style>
+/* Use full width and reduce padding on small screens */
+.block-container {max-width: 1200px; padding-top: 0.5rem; padding-bottom: 2rem;}
+@media (max-width: 768px) {
+  .block-container {padding: 0.5rem 0.7rem;}
+  .stDataFrame {font-size: 0.95rem;}
+  .stButton>button, .stDownloadButton>button {width: 100%; min-height: 48px; font-size: 1rem;}
+  .stTextInput>div>div>input, textarea, select {font-size: 1rem !important;}
+}
+
+/* Optional: hide Streamlit menu/footer for app-like feel */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# Apply “compact” spacing when toggled
+if compact:
+    st.markdown("""
+    <style>
+      /* tighten vertical space between blocks */
+      .element-container {margin-bottom: 0.6rem;}
+    </style>
+    """, unsafe_allow_html=True)
+
+
 st.set_page_config(page_title="Stock Decision Dashboard", layout="wide")
 
 # ==============================
@@ -519,4 +554,5 @@ with st.expander("💡 Reading the signals (quick tips)"):
 - **SELL/Trim** when: SellScore high, **%B near 1.0**, **RSI > 70**, **MACD histogram falling/negative**.  
 - **Wait** when signals conflict or volume is weak.  
 - Try combining this with **fundamentals** and **news** before making a trade.
+
     """)
