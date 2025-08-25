@@ -694,7 +694,7 @@ for ax in fig.layout:
     if ax.startswith("yaxis"):
         fig.layout[ax].tickfont = dict(size=13 if compact else 12)
 
-st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
+st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
 
 # ==============================
 # Backtest summary (simple, long-only)
@@ -726,4 +726,5 @@ with st.expander("💡 Quick tips"):
         "- Quiet sessions → **Lenient mode** or **Adaptive thresholds**.\n"
         "- Always cross-check with broader context (earnings, news)."
     )
+
 
