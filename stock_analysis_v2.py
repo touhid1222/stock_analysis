@@ -122,6 +122,89 @@ if not tickers:
     st.stop()
 
 # ==============================
+# 📘 Guidelines & Parameter Cheatsheet (NEW — detailed)
+# ==============================
+with st.expander("📘 Guidelines & Parameter Cheatsheet (what everything means & how it’s scored)", expanded=False):
+    st.markdown(f"""
+**A. Indicators (inputs)**
+- **RSI14** *(Relative Strength Index)*: 0–100. Lower = more oversold.  
+  • **Buy idea**: RSI ≤ **{rsi_buy_th}** (oversold zone).  
+  • **Sell idea**: RSI ≥ **{rsi_sell_th}** (overbought zone).
+
+- **Bollinger %B** *(position in band)*: 0≈lower band, 1≈upper band.  
+  • **Buy idea**: %B ≤ **{bb_buy_pct:.2f}** (cheap side).  
+  • **Sell idea**: %B ≥ **{bb_sell_pct:.2f}** (stretched).
+
+- **MACD (Histogram & Cross)**: momentum inflection.  
+  • **Bullish** when histogram crosses from <0 to >0.  
+  • **Bearish** when histogram crosses from >0 to <0.
+
+- **Vol Ratio**: today’s volume / 20D average.  
+  • **>1** = active interest; **<1** = quiet.  
+  • **Entry gate** *(optional)*: require Vol Ratio ≥ **{vol_ratio_min:.2f}** → toggle above.
+
+- **ATR14**: average true range (daily range).  
+  • Used to set stop = entry − (ATR × **{atr_mult:.2f}**) and take-profit = entry + (ATR × **{atr_mult:.2f} × {rr_target:.2f}**).
+
+- **Moving Averages**: EMA20 (short trend), EMA50 (mid), SMA200 (long).  
+  • Price above MA = bullish bias; below = bearish bias (context only, not scored directly).
+
+- **52-week distances**:  
+  • **Dist 52w Low %** small → near lows (potential value).  
+  • **Dist 52w High %** small → near highs (stretched).
+
+- **Returns (context)**: 5D, 21D (1 month), YTD; plus annualized 21D volatility (not used in score).
+
+**B. How Buy/Sell Scores are built (weights)**
+- **BuyScore** (0–100):  
+  • RSI contribution (up to **35**): more weight as RSI drops *below* buy threshold.  
+  • %B contribution (up to **25**): more weight as %B drops *below* buy %B.  
+  • MACD: **+10** on bullish cross; **+5** if histogram currently > 0.  
+  • Volume: up to **+15** boost when Vol Ratio goes from 1→2.  
+  • 52w Low proximity: **+8** if within ~20%.  
+  • *(If “Require min Vol Ratio” is ON and vol is weak: small **−8** penalty.)*
+
+- **SellScore** (0–100):  
+  • RSI contribution (up to **35**): more weight as RSI rises *above* sell threshold.  
+  • %B contribution (up to **25**): more weight as %B rises *above* sell %B.  
+  • MACD: **+10** on bearish cross; **+5** if histogram currently < 0.  
+  • 52w High proximity: **+10** if within ~12%.
+
+**C. Thresholds & Modes**
+- **Signal labels**:  
+  • **BUY setup** = BuyScore ≥ **{buy_threshold}** and SellScore < **{sell_threshold}**  
+  • **SELL/Trim setup** = SellScore ≥ **{sell_threshold}** and BuyScore < **{buy_threshold}**  
+  • Otherwise **WAIT**.
+
+- **Lenient / pre-market mode** *(toggle in sidebar)*: widens buy/sell zones and lowers score thresholds → better for quiet sessions.
+
+- **Adaptive thresholds (chart/backtest)**: use 80th percentile of recent Buy/Sell scores to set dynamic cutoffs when the market is too quiet.
+
+**D. Chart options**
+- **Simple view** = cleaner: Candles + EMA20 + RSI.  
+- Optional panels: **Bollinger**, **EMA50/SMA200**, **MACD**, **Volume**, and **Heikin-Ashi** candles for smoother view.
+
+**E. Backtest rule (very simple)**
+- **Entry**: when BuyScore crosses **above** threshold.  
+- **Exit**: when SellScore crosses **above** threshold, or **stop**, or **take-profit**.  
+- Displays total return, win rate, avg win/loss, and max drawdown (for the selected window only).
+
+**F. Suggested quick recipes**
+- *Mean-reversion buy*: RSI ≤ 45–55, %B ≤ 0.20–0.35, BuyScore ≥ 45–60, Vol Ratio > 0.8 (or gate OFF), ATR×{atr_mult:.1f}, TP = {rr_target:.1f}R.  
+- *Momentum trim*: RSI ≥ 65–70, %B ≥ 0.75–0.90, SellScore ≥ 55–65, especially near 52w high proximity.
+""")
+
+    st.markdown("**Your current settings (live):**")
+    st.code(f"""
+RSI oversold ≤ {rsi_buy_th}, RSI overbought ≥ {rsi_sell_th}
+%B buy ≤ {bb_buy_pct:.2f}, %B sell ≥ {bb_sell_pct:.2f}
+Min Vol Ratio (gate): {vol_ratio_min:.2f} | Gate ON? {use_volume_gate}
+ATR multiple: {atr_mult:.2f}, Take-profit (R): {rr_target:.2f}
+BuyScore threshold: {buy_threshold}, SellScore threshold: {sell_threshold}
+Lenient mode: {lenient_mode}
+""".strip())
+
+# ==============================
 # Data loader (cached)
 # ==============================
 @st.cache_data(show_spinner=True, ttl=60*10)
