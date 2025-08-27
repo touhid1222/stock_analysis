@@ -60,7 +60,7 @@ st.caption("Find **buy** near local lows and **sell/trim** near local highs. Use
 # ==============================
 # ---- Updated default list (core + momentum/AI + energy/infra + GARP + selective small/mid-caps)
 default_tickers = (
-    "HOOD, NVDA, AAPL, MSFT, AMZN, META, AMD, GOOG, TSLA, TSM, JPM, V, SPY, VOO, NOBL, "
+    "HOOD, NVDA, AAPL, MSFT, AMZN, META, AMD, GOOG, TSLA, TSM, JPM, V, SPY, VOO, NOBL, INTC, "
     "BTOG, LIDR, "
     # AI / Growth momentum
     "PLTR, SMCI, APP, SE, SHOP, NET, MGNI, "
@@ -726,6 +726,7 @@ with st.expander("💡 Quick tips"):
         "- Quiet sessions → **Lenient mode** or **Adaptive thresholds**.\n"
         "- Always cross-check with broader context (earnings, news)."
     )
+
 
 
 
