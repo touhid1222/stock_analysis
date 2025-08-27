@@ -687,7 +687,8 @@ fig.update_layout(
     xaxis_rangeslider_visible=False,
     title_text=f"{selected} — signals ({period})",
     margin=dict(l=10, r=10, t=40, b=10),
-    font=dict(size=14 if compact else 13)
+    font=dict(size=14 if compact else 13),
+    dragmode="pan"   # sets Pan as the default interaction
 )
 # Slightly larger y-ticks
 for ax in fig.layout:
@@ -726,6 +727,7 @@ with st.expander("💡 Quick tips"):
         "- Quiet sessions → **Lenient mode** or **Adaptive thresholds**.\n"
         "- Always cross-check with broader context (earnings, news)."
     )
+
 
 
 
