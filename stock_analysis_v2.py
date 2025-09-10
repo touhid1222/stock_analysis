@@ -22,7 +22,7 @@ with st.sidebar:
     st.header("🧭 How to use")
     st.markdown(
         "1) Pick **tickers** and **window**.\n"
-        "2) Tune **Strategy** (RSI / %B / ATR / Vol).\n"
+        "2) Tune **Strategy** (RSI main; others optional in Advanced).\n"
         "3) See **Top Opportunities**.\n"
         "4) Open a ticker → **Chart** + quick backtest.\n\n"
         "_Educational only — not financial advice._"
@@ -58,22 +58,10 @@ st.caption("Find **buy** near local lows and **sell/trim** near local highs. Use
 # ==============================
 # Inputs
 # ==============================
-# ---- Updated default list (core + momentum/AI + energy/infra + GARP + selective small/mid-caps)
 default_tickers = (
     "HOOD, NVDA, AAPL, MSFT, AMZN, META, AMD, GOOG, TSLA, TSM, JPM, V, SPY, VOO, NOBL, INTC, "
-    "BTOG, LIDR, "
-    # AI / Growth momentum
-    "PLTR, SMCI, APP, SE, SHOP, NET, MGNI, "
-    # AI Infrastructure & Energy
-    "CEG, VST, NRG, NEE, "
-    # Quality Growth / GARP
-    "AVGO, LLY, CRM, INTU, CTAS, HEI, "
-    # High potential Energy/Health/Construction
-    "EQT, BTSG, ROAD, "
-    # Speculative small/mid-caps
-    "MP, ABVX, NEGG"
+    "PLTR, SMCI, APP, SE, SHOP, NET, CEG, VST, NRG, NEE, AVGO, LLY, CRM, INTU, CTAS, HEI, EQT, ROAD, MP"
 )
-
 tickers_input = st.text_area("Enter stock tickers (comma-separated):", value=default_tickers)
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
@@ -85,27 +73,28 @@ period = st.selectbox(
 
 top_n = st.slider("Show top opportunities (rows):", 5, 50, 12, 1)
 
-# ---- Strategy sliders (defaults are a bit looser to surface more setups)
-colA, colB, colC = st.columns(3)
-with colA:
-    rsi_buy_th  = st.slider("RSI oversold ≤", 10, 70, 55, 1)  # looser default
-    rsi_sell_th = st.slider("RSI overbought ≥", 40, 90, 65, 1)  # looser default
-with colB:
-    bb_buy_pct  = st.slider("Near lower BB if %B ≤", 0, 60, 35, 1) / 100.0
-    bb_sell_pct = st.slider("Near upper BB if %B ≥", 50, 100, 75, 1) / 100.0
-with colC:
-    vol_ratio_min = st.slider("Min Vol Ratio (x 20D avg)", 0.1, 3.0, 0.4, 0.1)
-    atr_mult      = st.slider("ATR stop multiple", 0.5, 5.0, 1.5, 0.1)
+# ---- Key sliders (kept visible)
+colA1, colA2 = st.columns(2)
+with colA1:
+    rsi_buy_th  = st.slider("RSI oversold ≤", 10, 70, 55, 1)   # softer default
+with colA2:
+    rsi_sell_th = st.slider("RSI overbought ≥", 40, 90, 65, 1) # softer default
 
-# ---- Score thresholds (used for labels + backtest unless adaptive mode is enabled)
-buy_threshold  = st.slider("BuyScore threshold", 0, 100, 50, 1)
-sell_threshold = st.slider("SellScore threshold", 0, 100, 55, 1)
-rr_target      = st.slider("Take-profit (R multiple)", 0.5, 5.0, 1.5, 0.5)
+# ---- Less critical → Advanced (hidden by default, has good defaults)
+with st.expander("⚙️ Advanced strategy settings (optional)", expanded=False):
+    colB, colC = st.columns(2)
+    with colB:
+        bb_buy_pct  = st.slider("Near lower BB if %B ≤", 0, 60, 35, 1) / 100.0
+        bb_sell_pct = st.slider("Near upper BB if %B ≥", 50, 100, 75, 1) / 100.0
+        vol_ratio_min = st.slider("Min Vol Ratio (x 20D avg)", 0.1, 3.0, 0.4, 0.1)
+    with colC:
+        atr_mult      = st.slider("ATR stop multiple", 0.5, 5.0, 1.5, 0.1)
+        buy_threshold  = st.slider("BuyScore threshold", 0, 100, 50, 1)
+        sell_threshold = st.slider("SellScore threshold", 0, 100, 55, 1)
+        rr_target      = st.slider("Take-profit (R multiple)", 0.5, 5.0, 1.5, 0.5)
+        use_volume_gate = st.checkbox("Require min Vol Ratio (gate entries)", value=False)
 
-use_volume_gate = st.checkbox(
-    "Require min Vol Ratio (gate entries)", value=False,
-    help="If ON, entries need Vol Ratio ≥ Min Vol Ratio. If OFF, volume only boosts score."
-)
+# sensible defaults if user keeps Advanced closed (values above already set)
 
 # ---- Auto relax a bit more in quiet hours
 if lenient_mode:
@@ -122,87 +111,48 @@ if not tickers:
     st.stop()
 
 # ==============================
-# 📘 Guidelines & Parameter Cheatsheet (NEW — detailed)
+# 📘 Guidelines & Parameter Cheatsheet (updated)
 # ==============================
 with st.expander("📘 Guidelines & Parameter Cheatsheet (what everything means & how it’s scored)", expanded=False):
     st.markdown(f"""
-**A. Indicators (inputs)**
-- **RSI14** *(Relative Strength Index)*: 0–100. Lower = more oversold.  
-  • **Buy idea**: RSI ≤ **{rsi_buy_th}** (oversold zone).  
-  • **Sell idea**: RSI ≥ **{rsi_sell_th}** (overbought zone).
+**A. Core indicators**
+- **RSI14**: 0–100. Lower = more oversold.  
+  • **Buy idea**: RSI ≤ **{rsi_buy_th}** (oversold).  
+  • **Sell idea**: RSI ≥ **{rsi_sell_th}** (overbought).
 
-- **Bollinger %B** *(position in band)*: 0≈lower band, 1≈upper band.  
-  • **Buy idea**: %B ≤ **{bb_buy_pct:.2f}** (cheap side).  
-  • **Sell idea**: %B ≥ **{bb_sell_pct:.2f}** (stretched).
+- **Bollinger %B**: position inside band (0≈lower, 1≈upper).  
+  • **Buy** if %B ≤ **{bb_buy_pct:.2f}**; **Sell** if %B ≥ **{bb_sell_pct:.2f}**.
 
-- **MACD (Histogram & Cross)**: momentum inflection.  
-  • **Bullish** when histogram crosses from <0 to >0.  
-  • **Bearish** when histogram crosses from >0 to <0.
+- **MACD**: momentum flips via histogram / cross.  
+  • Bullish when hist ↗ through 0; Bearish when ↘ through 0.
 
-- **Vol Ratio**: today’s volume / 20D average.  
-  • **>1** = active interest; **<1** = quiet.  
-  • **Entry gate** *(optional)*: require Vol Ratio ≥ **{vol_ratio_min:.2f}** → toggle above.
+- **Golden Cross / Death Cross (NEW)**:  
+  • **Golden Cross** when **SMA50 > SMA200** (bullish bias).  
+  • **Death Cross** when **SMA50 < SMA200** (bearish bias).  
+  • A **recent cross** adds conviction to the signal.
 
-- **ATR14**: average true range (daily range).  
-  • Used to set stop = entry − (ATR × **{atr_mult:.2f}**) and take-profit = entry + (ATR × **{atr_mult:.2f} × {rr_target:.2f}**).
+- **Stochastic (14,3,3) (NEW)**:  
+  • **%K** and **%D**. **<20** = oversold (buy), **>80** = overbought (sell).  
+  • Often faster than RSI.
 
-- **Moving Averages**: EMA20 (short trend), EMA50 (mid), SMA200 (long).  
-  • Price above MA = bullish bias; below = bearish bias (context only, not scored directly).
+- **ADX(14) (NEW)**: trend **strength** (not direction).  
+  • **>25** = strong trend; **<20** = choppy.  
+  • Use with MACD: strong + bullish = higher confidence.
 
-- **52-week distances**:  
-  • **Dist 52w Low %** small → near lows (potential value).  
-  • **Dist 52w High %** small → near highs (stretched).
+**B. Volume & Risk**
+- **Vol Ratio**: today’s vol ÷ 20D avg.  
+  • >1 = active interest; <1 = quiet. Optionally gate entries (min **{vol_ratio_min:.2f}**).
+- **ATR14 × {atr_mult:.2f}**: sets stop; **TP = ATR × {atr_mult:.2f} × {rr_target:.2f}**.
 
-- **Returns (context)**: 5D, 21D (1 month), YTD; plus annualized 21D volatility (not used in score).
+**C. Scores & Labels**
+- **BuyScore ≥ {buy_threshold}** and **SellScore < {sell_threshold}** → **BUY setup**  
+- **SellScore ≥ {sell_threshold}** and **BuyScore < {buy_threshold}** → **SELL/Trim**  
+- Else → WAIT.
 
-**B. How Buy/Sell Scores are built (weights)**
-- **BuyScore** (0–100):  
-  • RSI contribution (up to **35**): more weight as RSI drops *below* buy threshold.  
-  • %B contribution (up to **25**): more weight as %B drops *below* buy %B.  
-  • MACD: **+10** on bullish cross; **+5** if histogram currently > 0.  
-  • Volume: up to **+15** boost when Vol Ratio goes from 1→2.  
-  • 52w Low proximity: **+8** if within ~20%.  
-  • *(If “Require min Vol Ratio” is ON and vol is weak: small **−8** penalty.)*
-
-- **SellScore** (0–100):  
-  • RSI contribution (up to **35**): more weight as RSI rises *above* sell threshold.  
-  • %B contribution (up to **25**): more weight as %B rises *above* sell %B.  
-  • MACD: **+10** on bearish cross; **+5** if histogram currently < 0.  
-  • 52w High proximity: **+10** if within ~12%.
-
-**C. Thresholds & Modes**
-- **Signal labels**:  
-  • **BUY setup** = BuyScore ≥ **{buy_threshold}** and SellScore < **{sell_threshold}**  
-  • **SELL/Trim setup** = SellScore ≥ **{sell_threshold}** and BuyScore < **{buy_threshold}**  
-  • Otherwise **WAIT**.
-
-- **Lenient / pre-market mode** *(toggle in sidebar)*: widens buy/sell zones and lowers score thresholds → better for quiet sessions.
-
-- **Adaptive thresholds (chart/backtest)**: use 80th percentile of recent Buy/Sell scores to set dynamic cutoffs when the market is too quiet.
-
-**D. Chart options**
-- **Simple view** = cleaner: Candles + EMA20 + RSI.  
-- Optional panels: **Bollinger**, **EMA50/SMA200**, **MACD**, **Volume**, and **Heikin-Ashi** candles for smoother view.
-
-**E. Backtest rule (very simple)**
-- **Entry**: when BuyScore crosses **above** threshold.  
-- **Exit**: when SellScore crosses **above** threshold, or **stop**, or **take-profit**.  
-- Displays total return, win rate, avg win/loss, and max drawdown (for the selected window only).
-
-**F. Suggested quick recipes**
-- *Mean-reversion buy*: RSI ≤ 45–55, %B ≤ 0.20–0.35, BuyScore ≥ 45–60, Vol Ratio > 0.8 (or gate OFF), ATR×{atr_mult:.1f}, TP = {rr_target:.1f}R.  
-- *Momentum trim*: RSI ≥ 65–70, %B ≥ 0.75–0.90, SellScore ≥ 55–65, especially near 52w high proximity.
+**D. Quick recipes**
+- *Mean-reversion buy*: RSI ≤ 45–55, %B ≤ 0.20–0.35, BuyScore ≥ 45–60, Vol Ratio > 0.8.  
+- *Momentum trim*: RSI ≥ 65–70, %B ≥ 0.75–1.0, SellScore ≥ 55–65, near 52w high, ADX > 25.
 """)
-
-    st.markdown("**Your current settings (live):**")
-    st.code(f"""
-RSI oversold ≤ {rsi_buy_th}, RSI overbought ≥ {rsi_sell_th}
-%B buy ≤ {bb_buy_pct:.2f}, %B sell ≥ {bb_sell_pct:.2f}
-Min Vol Ratio (gate): {vol_ratio_min:.2f} | Gate ON? {use_volume_gate}
-ATR multiple: {atr_mult:.2f}, Take-profit (R): {rr_target:.2f}
-BuyScore threshold: {buy_threshold}, SellScore threshold: {sell_threshold}
-Lenient mode: {lenient_mode}
-""".strip())
 
 # ==============================
 # Data loader (cached)
@@ -260,7 +210,7 @@ close_df = close_df[valid_cols]
 vol_df   = vol_df[valid_cols]
 
 # ==============================
-# Indicators
+# Indicators (NEW: Stochastic & ADX; Golden Cross)
 # ==============================
 def ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
@@ -325,6 +275,34 @@ def heikin_ashi(o,h,l,c):
     ha_low  = pd.concat([l, ha_open, ha_close], axis=1).min(axis=1)
     return ha_open, ha_high, ha_low, ha_close
 
+# --- NEW: Stochastic (14,3,3)
+def stochastic(high, low, close, n=14, k=3, d=3):
+    ll = low.rolling(n).min()
+    hh = high.rolling(n).max()
+    raw_k = 100 * (close - ll) / (hh - ll).replace(0, np.nan)
+    K = raw_k.rolling(k).mean()
+    D = K.rolling(d).mean()
+    return K, D
+
+# --- NEW: ADX(14)
+def adx(high, low, close, n=14):
+    up = high.diff()
+    dn = low.diff().abs()
+    plus_dm  = ((up > dn) & (up > 0)).astype(float) * up
+    minus_dm = ((dn > up) & (low.diff() < 0)).astype(float) * dn
+
+    tr1 = (high - low)
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low  - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr_ = tr.rolling(n).mean()
+    plus_di  = 100 * (plus_dm.rolling(n).mean() / atr_)
+    minus_di = 100 * (minus_dm.rolling(n).mean() / atr_)
+    dx = ( (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) ) * 100
+    adx_val = dx.rolling(n).mean()
+    return adx_val, plus_di, minus_di
+
 # ==============================
 # Per-ticker summary (scores + key fields)
 # ==============================
@@ -348,7 +326,16 @@ for t in valid_cols:
 
     ema20 = ema(p, 20).iloc[-1]
     ema50 = ema(p, 50).iloc[-1]
-    sma200 = p.rolling(200).mean().iloc[-1]
+    sma50_series = p.rolling(50).mean()
+    sma200_series = p.rolling(200).mean()
+    sma50 = sma50_series.iloc[-1]
+    sma200 = sma200_series.iloc[-1]
+
+    # Golden/Death cross
+    golden_now = (sma50 > sma200) if pd.notna(sma50) and pd.notna(sma200) else False
+    spread = sma50_series - sma200_series
+    cross_up_recent = (spread.tail(6).iloc[0] <= 0) and (spread.tail(6).iloc[-1] > 0) if spread.dropna().shape[0] > 6 else False
+    cross_dn_recent = (spread.tail(6).iloc[0] >= 0) and (spread.tail(6).iloc[-1] < 0) if spread.dropna().shape[0] > 6 else False
 
     atr14 = atr(h, l, p, 14).iloc[-1]
     avg_vol = v.rolling(20).mean().iloc[-1]
@@ -358,8 +345,14 @@ for t in valid_cols:
     dist_52w_low  = dlow.iloc[-1] if pd.notna(dlow.iloc[-1]) else np.nan
     dist_52w_high = dhigh.iloc[-1] if pd.notna(dhigh.iloc[-1]) else np.nan
 
+    # NEW: Stochastic & ADX
+    stochK, stochD = stochastic(h, l, p, 14, 3, 3)
+    stochK_last = stochK.iloc[-1]
+    stochD_last = stochD.iloc[-1]
+    adx14, plusDI, minusDI = adx(h, l, p, 14)
+    adx_last = adx14.iloc[-1]
+
     price = p.iloc[-1]
-    ret_5d  = (price / p.iloc[-6] - 1) * 100 if p.shape[0] > 6 else np.nan
     ret_21d = (price / p.iloc[-22] - 1) * 100 if p.shape[0] > 22 else np.nan
     try:
         ymask = (p.index.year == p.index[-1].year)
@@ -368,7 +361,7 @@ for t in valid_cols:
         ret_ytd = np.nan
     vol_21d = p.pct_change().rolling(21).std().iloc[-1] * np.sqrt(252) * 100  # annualized %
 
-    # ----- Buy/Sell Scores (relaxed, volume optional gate)
+    # ----- Buy/Sell Scores (add light contributions from Stoch & ADX)
     score = 0.0
     if pd.notna(rsi14):
         score += max(0, (rsi_buy_th - rsi14)) / max(1, rsi_buy_th) * 35
@@ -378,12 +371,16 @@ for t in valid_cols:
         score += 10.0
     if pd.notna(hist_last) and (hist_last > 0):
         score += 5.0
+    if pd.notna(stochK_last) and (stochK_last < 20):
+        score += 5.0
+    if pd.notna(adx_last) and (adx_last > 25) and (pd.notna(hist_last) and hist_last > 0):
+        score += 3.0
     if pd.notna(vol_ratio):
         if vol_ratio > 1:
             score += min(15.0, (vol_ratio - 1) / (2 - 1) * 15.0)
         elif use_volume_gate and (vol_ratio < vol_ratio_min):
-            score -= 8.0  # small penalty when volume is weak and gate is on
-    if pd.notna(dist_52w_low) and (dist_52w_low < 20):  # relaxed from 15
+            score -= 8.0
+    if pd.notna(dist_52w_low) and (dist_52w_low < 20):
         score += 8.0
     buy_score = round(min(100.0, max(0.0, score)), 1)
 
@@ -396,7 +393,11 @@ for t in valid_cols:
         sscore += 10.0
     if pd.notna(hist_last) and (hist_last < 0):
         sscore += 5.0
-    if pd.notna(dist_52w_high) and (dist_52w_high < 12):  # relaxed from 10
+    if pd.notna(stochK_last) and (stochK_last > 80):
+        sscore += 5.0
+    if pd.notna(adx_last) and (adx_last > 25) and (pd.notna(hist_last) and hist_last < 0):
+        sscore += 3.0
+    if pd.notna(dist_52w_high) and (dist_52w_high < 12):
         sscore += 10.0
     sell_score = round(min(100.0, max(0.0, sscore)), 1)
 
@@ -418,17 +419,15 @@ for t in valid_cols:
         "Price": round(float(price), 2),
         "RSI14": round(float(rsi14), 1) if pd.notna(rsi14) else np.nan,
         "%B": round(float(pb_last), 2) if pd.notna(pb_last) else np.nan,
-        "Vol Ratio": round(float(vol_ratio), 2) if pd.notna(vol_ratio) else np.nan,
+        "Stoch %K": round(float(stochK_last), 1) if pd.notna(stochK_last) else np.nan,
+        "Stoch %D": round(float(stochD_last), 1) if pd.notna(stochD_last) else np.nan,
+        "ADX14": round(float(adx_last), 1) if pd.notna(adx_last) else np.nan,
+        "Golden Cross": "Yes" if golden_now else "No",
+        "GCross Recent": "Yes" if cross_up_recent else ("Death Recent" if cross_dn_recent else "No"),
         "Ret 21D %": round(ret_21d, 2) if pd.notna(ret_21d) else np.nan,
         "YTD %": round(ret_ytd, 2) if pd.notna(ret_ytd) else np.nan,
-        "ATR14": round(float(atr14), 2) if pd.notna(atr14) else np.nan,
         "EMA20": round(float(ema20), 2) if pd.notna(ema20) else np.nan,
         "SMA200": round(float(sma200), 2) if pd.notna(sma200) else np.nan,
-        "Dist 52w Low %": round(dist_52w_low, 2) if pd.notna(dist_52w_low) else np.nan,
-        "Dist 52w High %": round(dist_52w_high, 2) if pd.notna(dist_52w_high) else np.nan,
-        # Kept hidden fields if you want to expose later:
-        "Vol 21D % (ann)": round(vol_21d, 2) if pd.notna(vol_21d) else np.nan,
-        "Ret 5D %": round(ret_5d, 2) if pd.notna(ret_5d) else np.nan,
     })
 
 summary = pd.DataFrame(rows)
@@ -438,8 +437,9 @@ if summary.empty:
 
 # ---- Reorder to decision-first columns for display
 priority_cols = [
-    "Ticker","Signal","BuyScore","SellScore","Price","RSI14","%B","Vol Ratio",
-    "Ret 21D %","YTD %","ATR14","EMA20","SMA200","Dist 52w Low %","Dist 52w High %"
+    "Ticker","Signal","BuyScore","SellScore","Price",
+    "RSI14","%B","Stoch %K","Stoch %D","ADX14","Golden Cross","GCross Recent",
+    "Ret 21D %","YTD %","EMA20","SMA200"
 ]
 summary = summary[priority_cols + [c for c in summary.columns if c not in priority_cols]]
 
@@ -451,7 +451,7 @@ st.subheader("🏆 Top Opportunities")
 left, right = st.columns([2,1])
 with right:
     sort_by = st.selectbox("Sort whole table by:",
-                           ["BuyScore","SellScore","RSI14","%B","Vol Ratio","Ret 21D %","YTD %"],
+                           ["BuyScore","SellScore","RSI14","%B","Stoch %K","ADX14","Ret 21D %","YTD %"],
                            index=0)
     filt = st.radio("Quick filter:", ["All","Only BUY","Only SELL"], index=0, horizontal=True)
 
@@ -482,10 +482,12 @@ sma200_s = p.rolling(200).mean()
 ma20_s, upBB_s, loBB_s, pb_s = bollinger(p, 20, 2)
 macd_line, sig_line, hist_s = macd(p)
 rsi_s = rsi(p, 14)
+stochK_s, stochD_s = stochastic(h, l, p, 14, 3, 3)
+adx_s, plusDI_s, minusDI_s = adx(h, l, p, 14)
 atr_s = atr(h, l, p, 14)
 mins_mask, maxs_mask = pivots(p)
 
-# ---- Per-bar Buy/Sell Scores (for entries/exits)
+# ---- Per-bar Buy/Sell Scores (same as before, with volume/lenient applied)
 def perbar_scores(price, rsi_series, pb_series, hist_series, vol_series):
     volr_series = (vol_series / vol_series.rolling(20).mean()).replace([np.inf, -np.inf], np.nan)
     dlow_s, dhigh_s = pct_from_52wk_ext(price)
@@ -500,7 +502,6 @@ def perbar_scores(price, rsi_series, pb_series, hist_series, vol_series):
         dl   = dlow_s.iloc[i]
         dh   = dhigh_s.iloc[i]
 
-        # BUY score
         bs = 0.0
         if pd.notna(rsiv):
             bs += max(0, (rsi_buy_th - rsiv)) / max(1, rsi_buy_th) * 35
@@ -513,7 +514,6 @@ def perbar_scores(price, rsi_series, pb_series, hist_series, vol_series):
         if pd.notna(dl) and (dl < 20): bs += 8.0
         buyS.iloc[i] = min(100.0, max(0.0, bs))
 
-        # SELL score
         ss = 0.0
         if pd.notna(rsiv):
             ss += max(0, (rsiv - rsi_sell_th)) / max(1, (100 - rsi_sell_th)) * 35
@@ -601,44 +601,50 @@ trades_df, tot_ret, winrate, avg_gain, avg_loss, max_dd = quick_backtest(p, entr
 # Chart controls (reduce clutter on phone)
 # ==============================
 st.markdown("#### Chart options")
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 with c1:
     simple_view = st.checkbox("Simple view", value=simple_view_default)
 with c2:
-    show_bb = st.checkbox("Bollinger Bands", value=not simple_view)
+    show_bb = st.checkbox("Bollinger", value=not simple_view)
 with c3:
     show_mas = st.checkbox("EMA50 / SMA200", value=not simple_view)
 with c4:
     show_macd = st.checkbox("MACD panel", value=not simple_view)
 with c5:
+    show_stoch = st.checkbox("Stochastic panel", value=False)
+with c6:
+    show_adx = st.checkbox("ADX panel", value=False)
+with c7:
     show_vol = st.checkbox("Volume panel", value=not simple_view)
 
-use_heikin = st.checkbox("Use Heikin-Ashi candles (smoother)", value=False)
-
 # ---- Decide subplot layout dynamically
-rows = 1 + int(show_vol) + int(show_macd) + 1  # price + (vol?) + (macd?) + rsi
+rows = 1 + int(show_vol) + int(show_macd) + int(show_stoch) + int(show_adx) + 1  # price + optional panels + rsi
 if simple_view:
-    row_heights = [0.58] + ([0.14] if show_vol else []) + ([0.14] if show_macd else []) + [0.14]
+    base = 0.55
 else:
-    row_heights = [0.48] + ([0.17] if show_vol else []) + ([0.18] if show_macd else []) + [0.17]
+    base = 0.45
+row_heights = [base]
+for flag in [show_vol, show_macd, show_stoch, show_adx]:
+    if flag: row_heights.append(0.14)
+row_heights.append(0.15)  # RSI
+
+titles = ["Price"]
+if show_vol:   titles.append("Volume")
+if show_macd:  titles.append("MACD")
+if show_stoch: titles.append("Stochastic")
+if show_adx:   titles.append("ADX")
+titles.append("RSI")
 
 fig = make_subplots(
     rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-    row_heights=row_heights,
-    subplot_titles=(["Price"] + (["Volume"] if show_vol else []) + (["MACD"] if show_macd else []) + ["RSI"])
+    row_heights=row_heights, subplot_titles=titles
 )
 
 # ---- Row indices
 row_idx = 1
 
 # ---- Price row (candles + key overlays + markers)
-if use_heikin:
-    ho, hh, hl, hc = heikin_ashi(o, h, l, p)
-    px_open, px_high, px_low, px_close = ho, hh, hl, hc
-else:
-    px_open, px_high, px_low, px_close = o, h, l, p
-
-fig.add_trace(go.Candlestick(x=p.index, open=px_open, high=px_high, low=px_low, close=px_close, name="Price"),
+fig.add_trace(go.Candlestick(x=p.index, open=o, high=h, low=l, close=p, name="Price"),
               row=row_idx, col=1)
 
 fig.add_trace(go.Scatter(x=p.index, y=ema20_s, name="EMA20", line=dict(width=1.6)), row=row_idx, col=1)
@@ -648,19 +654,6 @@ if show_mas:
 if show_bb:
     fig.add_trace(go.Scatter(x=p.index, y=upBB_s, name="Upper BB", line=dict(dash="dot", width=1)), row=row_idx, col=1)
     fig.add_trace(go.Scatter(x=p.index, y=loBB_s, name="Lower BB", line=dict(dash="dot", width=1)), row=row_idx, col=1)
-
-# Swing points + entries/exits
-mins_mask, maxs_mask = pivots(p)
-fig.add_trace(go.Scatter(x=p.index[mins_mask], y=p[mins_mask], mode="markers", name="Swing Low",
-                         marker=dict(symbol="triangle-up", size=9)), row=row_idx, col=1)
-fig.add_trace(go.Scatter(x=p.index[maxs_mask], y=p[maxs_mask], mode="markers", name="Swing High",
-                         marker=dict(symbol="triangle-down", size=9)), row=row_idx, col=1)
-if entries:
-    fig.add_trace(go.Scatter(x=[d for d,_ in entries], y=[px for _,px in entries],
-                             mode="markers", name="Entry", marker=dict(symbol="arrow-up", size=12)), row=row_idx, col=1)
-if exits:
-    fig.add_trace(go.Scatter(x=[d for d,_ in exits], y=[px for _,px in exits],
-                             mode="markers", name="Exit", marker=dict(symbol="arrow-down", size=12)), row=row_idx, col=1)
 
 # ---- Volume
 if show_vol:
@@ -674,7 +667,21 @@ if show_macd:
     fig.add_trace(go.Scatter(x=p.index, y=sig_line,  name="Signal"), row=row_idx, col=1)
     fig.add_trace(go.Bar(x=p.index, y=hist_s, name="Hist", opacity=0.6), row=row_idx, col=1)
 
-# ---- RSI
+# ---- Stochastic
+if show_stoch:
+    row_idx += 1
+    fig.add_trace(go.Scatter(x=p.index, y=stochK_s, name="%K"), row=row_idx, col=1)
+    fig.add_trace(go.Scatter(x=p.index, y=stochD_s, name="%D"), row=row_idx, col=1)
+    fig.add_hline(y=80, line_dash="dash", row=row_idx, col=1)
+    fig.add_hline(y=20, line_dash="dash", row=row_idx, col=1)
+
+# ---- ADX
+if show_adx:
+    row_idx += 1
+    fig.add_trace(go.Scatter(x=p.index, y=adx_s, name="ADX(14)"), row=row_idx, col=1)
+    fig.add_hline(y=25, line_dash="dash", row=row_idx, col=1)
+
+# ---- RSI (always shown)
 row_idx += 1
 fig.add_trace(go.Scatter(x=p.index, y=rsi_s, name="RSI14", line=dict(width=1.6)), row=row_idx, col=1)
 fig.add_trace(go.Scatter(x=p.index, y=[70]*len(p), name="70", line=dict(dash="dash", width=1)), row=row_idx, col=1)
@@ -682,19 +689,14 @@ fig.add_trace(go.Scatter(x=p.index, y=[30]*len(p), name="30", line=dict(dash="da
 
 # ---- Layout for readability on phone
 fig.update_layout(
-    height=820 if simple_view else 980,
+    height=820 if simple_view else 1020,
     showlegend=True,
     xaxis_rangeslider_visible=False,
     title_text=f"{selected} — signals ({period})",
     margin=dict(l=10, r=10, t=40, b=10),
     font=dict(size=14 if compact else 13),
-    dragmode="pan"   # sets Pan as the default interaction
+    dragmode="pan"
 )
-# Slightly larger y-ticks
-for ax in fig.layout:
-    if ax.startswith("yaxis"):
-        fig.layout[ax].tickfont = dict(size=13 if compact else 12)
-
 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
 
 # ==============================
@@ -702,6 +704,7 @@ st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "
 # ==============================
 st.markdown("### 🧪 Quick Backtest")
 c1, c2, c3, c4, c5 = st.columns(5)
+trades_df, tot_ret, winrate, avg_gain, avg_loss, max_dd = quick_backtest(p, entries, exits)
 c1.metric("Total Return", f"{tot_ret:.2f}%")
 c2.metric("Win Rate", f"{winrate:.1f}%")
 c3.metric("Avg Win", f"{avg_gain:.2f}%")
@@ -722,13 +725,9 @@ else:
 # ==============================
 with st.expander("💡 Quick tips"):
     st.markdown(
-        "- **BUY**: BuyScore rising, MACD hist flips positive, %B ~ 0–0.35, Vol Ratio > 1 if possible.\n"
-        "- **SELL/Trim**: SellScore high, %B ~ 0.75–1.0, RSI > 65–70, MACD hist falling/negative.\n"
+        "- **BUY**: BuyScore rising, MACD hist flips positive, %B ~ 0–0.35, RSI below threshold, Stoch %K < 20, ADX>25 helpful, Vol Ratio > 1 if possible.\n"
+        "- **SELL/Trim**: SellScore high, %B ~ 0.75–1.0, RSI > 65–70, Stoch %K > 80, MACD hist falling/negative, near 52w high.\n"
+        "- **Golden Cross** adds long bias; **Death Cross** adds caution.\n"
         "- Quiet sessions → **Lenient mode** or **Adaptive thresholds**.\n"
         "- Always cross-check with broader context (earnings, news)."
     )
-
-
-
-
-
