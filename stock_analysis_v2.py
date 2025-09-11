@@ -892,9 +892,18 @@ if not news_df.empty:
 
 # 3) Macro regime: higher VIX subtracts, SPY up adds, crypto adds for crypto-sensitive stocks
 macro_edge = 0.0
-if not math.isnan(vix_pct):
-    macro_edge += -0.8 * max(0.0, (vix_pct - 0.5))  # if VIX high vs 6m, reduce odds
-macro_edge += 0.4 * spy_trend
+try:
+    vix_val = float(np.asarray(vix_pct).ravel()[0])
+    if np.isfinite(vix_val):
+        macro_edge += -0.8 * float(np.maximum(0.0, vix_val - 0.5))  # if VIX high vs 6m, reduce odds
+except Exception:
+    pass
+try:
+    st_spy_trend = float(np.asarray(spy_trend).ravel()[0])
+    if np.isfinite(st_spy_trend):
+        macro_edge += 0.4 * st_spy_trend
+except Exception:
+    pass
 # mild bonus if ticker is likely crypto-sensitive
 if selected in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
     macro_edge += 0.6 * np.tanh(crypto_24h * 10)
