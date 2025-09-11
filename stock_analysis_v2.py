@@ -548,11 +548,20 @@ else:
 
 spy_series = macro.get("spy", pd.DataFrame())
 spy_trend = 0.0
-if not spy_series.empty:
-    spy_c = spy_series["Close"].dropna()
-    if len(spy_c) > 50:
-        spy_ema50 = ema(spy_c, 50)
-        spy_trend = float(np.tanh((spy_c.iloc[-1] - spy_ema50.iloc[-1]) / max(1e-6, spy_ema50.iloc[-1]) * 10))
+try:
+    # Ensure we really have the Close column as a Series
+    if isinstance(spy_series, pd.DataFrame) and ("Close" in spy_series.columns) and not spy_series.empty:
+        spy_c = spy_series["Close"].astype(float).dropna()
+        if spy_c.shape[0] > 50:
+            spy_ema50 = ema(spy_c, 50)
+            # Safely coerce to scalars even if objects come back as 0-d arrays/Series
+            close_val = float(np.asarray(spy_c.iloc[-1]).ravel()[0])
+            ema_val   = float(np.asarray(spy_ema50.iloc[-1]).ravel()[0])
+            denom = ema_val if (np.isfinite(ema_val) and abs(ema_val) > 1e-6) else 1e-6
+            spy_trend = float(np.tanh(((close_val - ema_val) / denom) * 10))
+except Exception:
+    # Keep default 0.0 if anything odd happens
+    spy_trend = 0.0
 
 btc = macro.get("btc", pd.DataFrame())
 eth = macro.get("eth", pd.DataFrame())
