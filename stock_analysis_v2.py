@@ -539,10 +539,13 @@ summary = summary[priority_cols + [c for c in summary.columns if c not in priori
 macro = fetch_macro_series()
 
 vix_series = macro.get("vix", pd.DataFrame())
-if not vix_series.empty:
-    vix_close = vix_series["Close"].dropna()
-    vix_now = float(vix_close.iloc[-1]) if len(vix_close) else np.nan
-    vix_pct = (vix_close.rank(pct=True).iloc[-1] if len(vix_close) else 0.5)  # percentile in last 6m
+if not vix_series.empty and "Close" in vix_series.columns:
+    vix_close = vix_series["Close"].astype(float).dropna()
+    if len(vix_close):
+        vix_now = float(np.asarray(vix_close.iloc[-1]).ravel()[0])
+        vix_pct = float(np.asarray(vix_close.rank(pct=True).iloc[-1]).ravel()[0])  # percentile in last 6m
+    else:
+        vix_now, vix_pct = np.nan, 0.5
 else:
     vix_now, vix_pct = np.nan, 0.5
 
@@ -955,7 +958,12 @@ else: pass
 if spy_trend > 0.1: bull_pts.append("SPY above trend (risk-on)")
 elif spy_trend < -0.1: bear_pts.append("SPY below trend (risk-off)")
 
-if not math.isnan(vix_pct) and vix_pct > 0.7: bear_pts.append("VIX elevated vs 6m (volatility risk)")
+try:
+    vix_flag_val = float(np.asarray(vix_pct).ravel()[0])
+    if np.isfinite(vix_flag_val) and vix_flag_val > 0.7:
+        bear_pts.append("VIX elevated vs 6m (volatility risk)")
+except Exception:
+    pass
 
 if selected in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
     if crypto_24h > 0: bull_pts.append("Crypto 24h up (supportive for flow-sensitive names)")
