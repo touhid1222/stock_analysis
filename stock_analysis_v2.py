@@ -878,115 +878,165 @@ else:
 # ==============================
 st.markdown("### 🎯 Decision Panel — Up/Down Likelihood (real-time)")
 
-# 1) Technical edge from last bar
-last_buy = float(buyS_s.iloc[-1]) if len(buyS_s) else 0.0
-last_sell = float(sellS_s.iloc[-1]) if len(sellS_s) else 0.0
-tech_edge = (last_buy - last_sell) / 100.0  # -1..1
+# NEW: Dedicated dropdown for probability ticker (your shortlist)
+prob_list_raw = ["HOOD","NVDIA","AMD","META","AMAT","TSLA","AMZA","MSFT"]
+ALIAS = {"NVDIA":"NVDA"}  # common typo fix
+prob_list = [ALIAS.get(x, x) for x in prob_list_raw]
+pt = st.selectbox("Select ticker for probability:", prob_list, index=0)
+if "NVDIA" in prob_list_raw and pt == "NVDA":
+    st.caption("Note: corrected 'NVDIA' → 'NVDA'.")
 
-# 2) News sentiment edge (weighted last 72h)
-news_edge = 0.0
-policy_hit = False
-if not news_df.empty:
-    recent = news_df[(pd.Timestamp.now(tz=timezone.utc) - news_df["published"]) <= pd.Timedelta(hours=72)]
-    if recent.empty:
-        recent = news_df.head(10)
-    news_edge = float(np.tanh(recent["weighted_sent"].sum()))  # -1..1
-    policy_hit = bool(recent["policy_risk"].any())
+# Helper to ensure we have series for any ticker (even if not in the main table)
+def ensure_ticker_series(ticker: str):
+    try:
+        if ticker in close_df.columns:
+            p = close_df[ticker].dropna()
+            o = open_df[ticker].reindex(p.index)
+            h = high_df[ticker].reindex(p.index)
+            l = low_df[ticker].reindex(p.index)
+            v = vol_df[ticker].reindex(p.index).fillna(0)
+        else:
+            extra = fetch_prices([ticker], period)
+            if extra is None or extra.empty:
+                return None
+            oDf = get_field(extra, "Open", [ticker])
+            hDf = get_field(extra, "High", [ticker])
+            lDf = get_field(extra, "Low", [ticker])
+            cDf = get_field(extra, "Adj Close" if "Adj Close" in extra.columns.get_level_values(0) else "Close", [ticker])
+            vDf = get_field(extra, "Volume", [ticker])
+            # Each are single-column frames — align on index
+            p = cDf[ticker].dropna()
+            o = oDf[ticker].reindex(p.index)
+            h = hDf[ticker].reindex(p.index)
+            l = lDf[ticker].reindex(p.index)
+            v = vDf[ticker].reindex(p.index).fillna(0)
+        if p is None or p.empty or p.shape[0] < 30:
+            return None
+        return o, h, l, p, v
+    except Exception:
+        return None
 
-# 3) Macro regime: higher VIX subtracts, SPY up adds, crypto adds for crypto-sensitive stocks
-macro_edge = 0.0
-try:
-    vix_val = float(np.asarray(vix_pct).ravel()[0])
-    if np.isfinite(vix_val):
-        macro_edge += -0.8 * float(np.maximum(0.0, vix_val - 0.5))  # if VIX high vs 6m, reduce odds
-except Exception:
-    pass
-try:
-    st_spy_trend = float(np.asarray(spy_trend).ravel()[0])
-    if np.isfinite(st_spy_trend):
-        macro_edge += 0.4 * st_spy_trend
-except Exception:
-    pass
-# mild bonus if ticker is likely crypto-sensitive
-if selected in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
-    macro_edge += 0.6 * np.tanh(crypto_24h * 10)
+_series = ensure_ticker_series(pt)
+if _series is None:
+    st.warning(f"Could not load adequate price data for {pt}. Try another ticker or a longer window.")
+else:
+    o_pt, h_pt, l_pt, p_pt, v_pt = _series
 
-# 4) Volume impulse (today vs 20D avg) — if available for last bar
-try:
-    vol_ratio_last = float((v.iloc[-1] / v.rolling(20).mean().iloc[-1]))
-    vol_edge = 0.3 * np.tanh((vol_ratio_last - 1.0) * 1.2)
-except Exception:
-    vol_edge = 0.0
+    # Compute indicator series for the chosen probability ticker
+    ema20_pt = ema(p_pt, 20)
+    sma200_pt = p_pt.rolling(200).mean()
+    _, _, _, pb_pt = bollinger(p_pt, 20, 2)
+    _, _, hist_pt = macd(p_pt)
+    rsi_pt = rsi(p_pt, 14)
 
-# 5) Policy risk penalty if triggered in recent headlines
-policy_penalty = -0.25 if policy_hit else 0.0
+    # Per-bar scores (reuse function)
+    buyS_pt, sellS_pt = perbar_scores(p_pt, rsi_pt, pb_pt, hist_pt, v_pt)
 
-# Combine (logistic)
-z = 1.6*tech_edge + 0.7*news_edge + 0.6*macro_edge + 0.3*vol_edge + policy_penalty
-prob_up = 1.0 / (1.0 + math.exp(-z))  # 0..1
-prob_up_pct = round(prob_up * 100.0, 1)
+    # 1) Technical edge from last bar
+    last_buy = float(buyS_pt.iloc[-1]) if len(buyS_pt) else 0.0
+    last_sell = float(sellS_pt.iloc[-1]) if len(sellS_pt) else 0.0
+    tech_edge = (last_buy - last_sell) / 100.0  # -1..1
 
-# ---- Gauge
-fig_prob = go.Figure(go.Indicator(
-    mode = "gauge+number",
-    value = prob_up_pct,
-    title = {"text": f"{selected} — Chance Up (next session)"},
-    number = {"suffix":"%"},
-    gauge = {
-        "axis": {"range": [0, 100]},
-        "bar": {"thickness": 0.25},
-        "steps": [
-            {"range": [0, 40],  "color": "#ffcccc"},
-            {"range": [40, 60], "color": "#fff4cc"},
-            {"range": [60, 100],"color": "#d8f5d0"}
-        ],
-        "threshold": {"line": {"width": 4}, "thickness": 0.8, "value": prob_up_pct}
-    }
-))
-fig_prob.update_layout(height=240, margin=dict(l=10,r=10,t=40,b=10))
-st.plotly_chart(fig_prob, use_container_width=True)
+    # 2) News sentiment edge for selected ticker (weighted last 72h)
+    news_df_pt = get_news_with_sentiment(pt)
+    news_edge = 0.0
+    policy_hit = False
+    if not news_df_pt.empty:
+        recent_pt = news_df_pt[(pd.Timestamp.now(tz=timezone.utc) - news_df_pt["published"]) <= pd.Timedelta(hours=72)]
+        if recent_pt.empty:
+            recent_pt = news_df_pt.head(10)
+        news_edge = float(np.tanh(recent_pt["weighted_sent"].sum()))
+        policy_hit = bool(recent_pt["policy_risk"].any())
 
-# ---- Reasons panel
-bull_pts, bear_pts = [], []
-if tech_edge > 0: bull_pts.append("Technical scores favor BUY over SELL")
-else: bear_pts.append("Technical scores lean to SELL/Trim")
+    # 3) Macro regime: reuse already-computed globals (vix_pct, spy_trend, crypto_24h)
+    macro_edge = 0.0
+    try:
+        vix_val = float(np.asarray(vix_pct).ravel()[0])
+        if np.isfinite(vix_val):
+            macro_edge += -0.8 * float(np.maximum(0.0, vix_val - 0.5))
+    except Exception:
+        pass
+    try:
+        st_spy_trend = float(np.asarray(spy_trend).ravel()[0])
+        if np.isfinite(st_spy_trend):
+            macro_edge += 0.4 * st_spy_trend
+    except Exception:
+        pass
+    if pt in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
+        macro_edge += 0.6 * np.tanh(crypto_24h * 10)
 
-if news_edge > 0.05: bull_pts.append("News sentiment positive (recent headlines)")
-elif news_edge < -0.05: bear_pts.append("News sentiment negative (recent headlines)")
-else: pass
+    # 4) Volume impulse (today vs 20D avg)
+    try:
+        vol_ratio_last = float((v_pt.iloc[-1] / v_pt.rolling(20).mean().iloc[-1]))
+        vol_edge = 0.3 * np.tanh((vol_ratio_last - 1.0) * 1.2)
+    except Exception:
+        vol_edge = 0.0
 
-if spy_trend > 0.1: bull_pts.append("SPY above trend (risk-on)")
-elif spy_trend < -0.1: bear_pts.append("SPY below trend (risk-off)")
+    # 5) Policy risk penalty if triggered in recent headlines
+    policy_penalty = -0.25 if policy_hit else 0.0
 
-try:
-    vix_flag_val = float(np.asarray(vix_pct).ravel()[0])
-    if np.isfinite(vix_flag_val) and vix_flag_val > 0.7:
-        bear_pts.append("VIX elevated vs 6m (volatility risk)")
-except Exception:
-    pass
+    # Combine (logistic)
+    z = 1.6*tech_edge + 0.7*news_edge + 0.6*macro_edge + 0.3*vol_edge + policy_penalty
+    prob_up = 1.0 / (1.0 + math.exp(-z))
+    prob_up_pct = round(prob_up * 100.0, 1)
 
-if selected in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
-    if crypto_24h > 0: bull_pts.append("Crypto 24h up (supportive for flow-sensitive names)")
-    elif crypto_24h < 0: bear_pts.append("Crypto 24h down (headwind)")
+    # ---- Gauge
+    fig_prob = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = prob_up_pct,
+        title = {"text": f"{pt} — Chance Up (next session)"},
+        number = {"suffix":"%"},
+        gauge = {
+            "axis": {"range": [0, 100]},
+            "bar": {"thickness": 0.25},
+            "steps": [
+                {"range": [0, 40],  "color": "#ffcccc"},
+                {"range": [40, 60], "color": "#fff4cc"},
+                {"range": [60, 100],"color": "#d8f5d0"}
+            ],
+            "threshold": {"line": {"width": 4}, "thickness": 0.8, "value": prob_up_pct}
+        }
+    ))
+    fig_prob.update_layout(height=240, margin=dict(l=10,r=10,t=40,b=10))
+    st.plotly_chart(fig_prob, use_container_width=True)
 
-if policy_hit: bear_pts.append("Policy/tariff/regulatory headline detected — caution")
+    # ---- Reasons panel
+    bull_pts, bear_pts = [], []
+    if tech_edge > 0: bull_pts.append("Technical scores favor BUY over SELL")
+    else: bear_pts.append("Technical scores lean to SELL/Trim")
 
-colL, colR = st.columns(2)
-with colL:
-    st.markdown("**Bullish factors**")
-    if bull_pts:
-        st.markdown("\n".join([f"- {x}" for x in bull_pts]))
-    else:
-        st.markdown("- (none strong)")
-with colR:
-    st.markdown("**Bearish factors**")
-    if bear_pts:
-        st.markdown("\n".join([f"- {x}" for x in bear_pts]))
-    else:
-        st.markdown("- (none strong)")
+    if news_edge > 0.05: bull_pts.append("News sentiment positive (recent headlines)")
+    elif news_edge < -0.05: bear_pts.append("News sentiment negative (recent headlines)")
+
+    try:
+        if np.isfinite(vix_val) and vix_val > 0.7:
+            bear_pts.append("VIX elevated vs 6m (volatility risk)")
+    except Exception:
+        pass
+
+    try:
+        if st_spy_trend > 0.1: bull_pts.append("SPY above trend (risk-on)")
+        elif st_spy_trend < -0.1: bear_pts.append("SPY below trend (risk-off)")
+    except Exception:
+        pass
+
+    if pt in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
+        if crypto_24h > 0: bull_pts.append("Crypto 24h up (supportive for flow-sensitive names)")
+        elif crypto_24h < 0: bear_pts.append("Crypto 24h down (headwind)")
+
+    if policy_hit: bear_pts.append("Policy/tariff/regulatory headline detected — caution")
+
+    colL, colR = st.columns(2)
+    with colL:
+        st.markdown("**Bullish factors**")
+        st.markdown("\n".join([f"- {x}" for x in bull_pts]) if bull_pts else "- (none strong)")
+    with colR:
+        st.markdown("**Bearish factors**")
+        st.markdown("\n".join([f"- {x}" for x in bear_pts]) if bear_pts else "- (none strong)")
 
 # ==============================
 # Tips (short)
+# ==============================
 # ==============================
 with st.expander("💡 Quick tips"):
     st.markdown(
