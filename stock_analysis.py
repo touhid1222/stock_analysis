@@ -491,8 +491,6 @@ def compute_probability_and_reasons(ticker: str,
         "rsi": rsi_s
     }
     return prob_up, {"meta": out, "series": series}
-
-    series = {
         "p": p, "o": o, "h": h, "l": l,
         "ema20": ema20, "ema50": ema50, "sma200": sma200,
         "upBB": upBB, "loBB": loBB,
@@ -626,11 +624,7 @@ app.layout = dbc.Container([
 # --------------------------------------------------------------------------------------
 
 # auto-refresh interval wiring
-@app.callback(Output("auto-interval", "interval"), [Input("auto-min", "value")])
-def set_interval(mins):
-    try:
-        mins = int(mins or 0)
-        return 0 if mins <= 0 else mins * 60 * 1000
+ if mins <= 0 else mins * 60 * 1000
     except Exception:
         return 0
 
