@@ -1,16 +1,37 @@
 # -*- coding: utf-8 -*-
 ##############################################################################################
 # Stock Decision Dashboard — buy low / sell high helper (not financial advice)
+#
+# NEW in this version
+#   • News sentiment (Yahoo Finance + Google News RSS fallback) per ticker
+#   • Macro regime: VIX percentile, SPY trend, BTC/ETH 24h (risk-on proxy)
+#   • Policy-risk keywords (e.g., tariff / Trump / SEC / lawsuit) with penalty
+#   • Real-time Decision Panel: Probability the next move is UP (gauge + reasons)
+#   • "🔄 Refresh" button clears cache and refetches data/news immediately
+#   • Minor fixes, better error handling, and mobile-friendly tweaks
+#
 # Run: streamlit run app.py
 ##############################################################################################
+
+import math
+import time
+import json
+import requests
+from urllib.parse import quote_plus
+from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import streamlit as st
-from datetime import datetime
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    _HAS_VADER = True
+except Exception:
+    _HAS_VADER = False
 
 # ==============================
 # Page / Mobile UX (single call)
@@ -24,14 +45,23 @@ with st.sidebar:
         "1) Pick **tickers** and **window**.\n"
         "2) Tune **Strategy** (RSI main; others optional in Advanced).\n"
         "3) See **Top Opportunities**.\n"
-        "4) Open a ticker → **Chart** + quick backtest.\n\n"
+        "4) Open a ticker → **Chart** + backtest + **Decision Panel**.\n\n"
         "_Educational only — not financial advice._"
     )
     st.markdown("---")
     compact = st.toggle("📱 Compact mobile layout", value=True)
     simple_view_default = st.toggle("🧼 Simple chart view by default", value=True)
-    # Use this when you scan pre-market / quiet sessions
     lenient_mode = st.toggle("🌙 Lenient / pre-market mode", value=True)
+
+    st.markdown("---")
+    if st.button("🔄 Refresh data & news (force)"):
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        # Trigger a rerun
+        st.session_state["_refresh_ts"] = time.time()
+        st.rerun()
 
 # ---- Global CSS for mobile readability
 st.markdown("""
@@ -52,8 +82,8 @@ if compact:
 # ==============================
 # Header
 # ==============================
-st.title("📈 Stock Decision Dashboard")
-st.caption("Find **buy** near local lows and **sell/trim** near local highs. Use scores + charts + quick backtest. (Not financial advice)")
+st.title("📈 Stock Decision Dashboard — with News & Probability")
+st.caption("Find **buy** near local lows and **sell/trim** near local highs. Scores + news + quick backtest + probability. (Not financial advice)")
 
 # ==============================
 # Inputs
@@ -62,8 +92,17 @@ default_tickers = (
     "HOOD, NVDA, AAPL, MSFT, AMZN, META, AMD, GOOG, TSLA, TSM, JPM, V, SPY, VOO, NOBL, INTC, "
     "PLTR, SMCI, APP, SE, SHOP, NET, CEG, VST, NRG, NEE, AVGO, LLY, CRM, INTU, CTAS, HEI, EQT, ROAD, MP"
 )
+
 tickers_input = st.text_area("Enter stock tickers (comma-separated):", value=default_tickers)
-tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+# sanitize and unique
+_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+# keep order but unique
+seen = set()
+tickers = []
+for t in _tickers:
+    if t not in seen:
+        tickers.append(t)
+        seen.add(t)
 
 period = st.selectbox(
     "Select historical window:",
@@ -111,54 +150,10 @@ if not tickers:
     st.stop()
 
 # ==============================
-# 📘 Guidelines & Parameter Cheatsheet (updated)
-# ==============================
-with st.expander("📘 Guidelines & Parameter Cheatsheet (what everything means & how it’s scored)", expanded=False):
-    st.markdown(f"""
-**A. Core indicators**
-- **RSI14**: 0–100. Lower = more oversold.  
-  • **Buy idea**: RSI ≤ **{rsi_buy_th}** (oversold).  
-  • **Sell idea**: RSI ≥ **{rsi_sell_th}** (overbought).
-
-- **Bollinger %B**: position inside band (0≈lower, 1≈upper).  
-  • **Buy** if %B ≤ **{bb_buy_pct:.2f}**; **Sell** if %B ≥ **{bb_sell_pct:.2f}**.
-
-- **MACD**: momentum flips via histogram / cross.  
-  • Bullish when hist ↗ through 0; Bearish when ↘ through 0.
-
-- **Golden Cross / Death Cross (NEW)**:  
-  • **Golden Cross** when **SMA50 > SMA200** (bullish bias).  
-  • **Death Cross** when **SMA50 < SMA200** (bearish bias).  
-  • A **recent cross** adds conviction to the signal.
-
-- **Stochastic (14,3,3) (NEW)**:  
-  • **%K** and **%D**. **<20** = oversold (buy), **>80** = overbought (sell).  
-  • Often faster than RSI.
-
-- **ADX(14) (NEW)**: trend **strength** (not direction).  
-  • **>25** = strong trend; **<20** = choppy.  
-  • Use with MACD: strong + bullish = higher confidence.
-
-**B. Volume & Risk**
-- **Vol Ratio**: today’s vol ÷ 20D avg.  
-  • >1 = active interest; <1 = quiet. Optionally gate entries (min **{vol_ratio_min:.2f}**).
-- **ATR14 × {atr_mult:.2f}**: sets stop; **TP = ATR × {atr_mult:.2f} × {rr_target:.2f}**.
-
-**C. Scores & Labels**
-- **BuyScore ≥ {buy_threshold}** and **SellScore < {sell_threshold}** → **BUY setup**  
-- **SellScore ≥ {sell_threshold}** and **BuyScore < {buy_threshold}** → **SELL/Trim**  
-- Else → WAIT.
-
-**D. Quick recipes**
-- *Mean-reversion buy*: RSI ≤ 45–55, %B ≤ 0.20–0.35, BuyScore ≥ 45–60, Vol Ratio > 0.8.  
-- *Momentum trim*: RSI ≥ 65–70, %B ≥ 0.75–1.0, SellScore ≥ 55–65, near 52w high, ADX > 25.
-""")
-
-# ==============================
-# Data loader (cached)
+# Utilities
 # ==============================
 @st.cache_data(show_spinner=True, ttl=60*10)
-def fetch_data(tickers, window):
+def fetch_prices(tickers, window):
     """Download OHLCV for given tickers and window."""
     now = datetime.now()
     if window.endswith('w'):
@@ -173,14 +168,123 @@ def fetch_data(tickers, window):
         df = yf.download(tickers, period=window, interval="1d", auto_adjust=False, progress=False)
     return df
 
-data = fetch_data(tickers, period)
-if data is None or data.empty:
-    st.error("No data retrieved. Check tickers or connection.")
-    st.stop()
+@st.cache_data(show_spinner=False, ttl=60*5)
+def fetch_macro_series():
+    """Get macro proxies: VIX, SPY, BTC, ETH (last values and small window)."""
+    macro = {}
+    try:
+        vix = yf.download("^VIX", period="6mo", interval="1d", auto_adjust=False, progress=False)
+        macro["vix"] = vix
+    except Exception:
+        macro["vix"] = pd.DataFrame()
+    try:
+        spy = yf.download("SPY", period="3mo", interval="1d", auto_adjust=False, progress=False)
+        macro["spy"] = spy
+    except Exception:
+        macro["spy"] = pd.DataFrame()
+    try:
+        btc = yf.download("BTC-USD", period="7d", interval="1h", auto_adjust=False, progress=False)
+        eth = yf.download("ETH-USD", period="7d", interval="1h", auto_adjust=False, progress=False)
+        macro["btc"] = btc
+        macro["eth"] = eth
+    except Exception:
+        macro["btc"] = pd.DataFrame(); macro["eth"] = pd.DataFrame()
+    return macro
+
+# --- News helpers (Yahoo Finance + Google News RSS fallback)
+POLICY_NEG_KEYS = [
+    "tariff", "trade war", "sanction", "ban", "export control", "retaliation", "retaliatory",
+    "trump", "biden", "white house", "congress", "sec charges", "lawsuit", "antitrust",
+    "probe", "investigation", "recall", "downgrade", "guidance cut", "secondary offering",
+    "share offering", "convertible", "fraud", "accounting issue", "restatement", "delisting"
+]
+
+@st.cache_data(show_spinner=False, ttl=60*5)
+def fetch_news_yf(ticker: str) -> pd.DataFrame:
+    items = []
+    try:
+        n = yf.Ticker(ticker).news
+        if n:
+            for it in n[:30]:
+                title = it.get("title", "")
+                link = it.get("link", "")
+                source = it.get("publisher", "")
+                ts = it.get("providerPublishTime", None)
+                published = datetime.utcfromtimestamp(ts).replace(tzinfo=timezone.utc) if ts else None
+                items.append({"title": title, "source": source, "link": link, "published": published})
+    except Exception:
+        pass
+    return pd.DataFrame(items)
+
+@st.cache_data(show_spinner=False, ttl=60*5)
+def fetch_news_google(ticker: str) -> pd.DataFrame:
+    # Simple RSS parse (no extra deps)
+    url = f"https://news.google.com/rss/search?q={quote_plus(ticker+' stock')}+when:7d&hl=en-US&gl=US&ceid=US:en"
+    items = []
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            from xml.etree import ElementTree as ET
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item"):
+                title = item.findtext("title") or ""
+                link = item.findtext("link") or ""
+                pub = item.findtext("pubDate") or ""
+                try:
+                    published = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=timezone.utc)
+                except Exception:
+                    published = None
+                source = (item.find("source").text if item.find("source") is not None else "")
+                items.append({"title": title, "source": source, "link": link, "published": published})
+    except Exception:
+        pass
+    return pd.DataFrame(items)
+
+@st.cache_data(show_spinner=False, ttl=60*5)
+def get_news_with_sentiment(ticker: str) -> pd.DataFrame:
+    df1 = fetch_news_yf(ticker)
+    df2 = fetch_news_google(ticker)
+    df = pd.concat([df1, df2], ignore_index=True)
+    if df.empty:
+        return df
+    # Clean + dedupe
+    df = df.dropna(subset=["title"]).copy()
+    df["title"] = df["title"].astype(str).str.strip()
+    df["source"] = df.get("source", pd.Series([""]*len(df)))
+    df["published"] = pd.to_datetime(df.get("published"), errors="coerce", utc=True)
+    df = df.sort_values("published", ascending=False)
+    df = df.drop_duplicates(subset=["title"], keep="first")
+
+    # Sentiment
+    def _sent(x: str) -> float:
+        if not x:
+            return 0.0
+        if _HAS_VADER:
+            try:
+                score = SentimentIntensityAnalyzer().polarity_scores(x)
+                return float(score.get("compound", 0.0))
+            except Exception:
+                return 0.0
+        # fallback mini-lexicon (very rough)
+        pos = ["surge", "beat", "outperform", "upgrade", "soar", "growth", "record", "raise", "profit"]
+        neg = ["miss", "downgrade", "fall", "plunge", "drop", "loss", "cut", "probe", "lawsuit", "ban", "tariff"]
+        s = x.lower()
+        return (sum(w in s for w in pos) - sum(w in s for w in neg)) / 5.0
+
+    df["sentiment"] = df["title"].astype(str).apply(_sent)
+    low_titles = df["title"].str.lower().fillna("")
+    df["policy_risk"] = low_titles.apply(lambda s: any(k in s for k in POLICY_NEG_KEYS))
+    # recency weight: 1.0 for <= 24h, then decay
+    now = datetime.now(timezone.utc)
+    hours = (now - df["published"]).dt.total_seconds().div(3600).fillna(999)
+    df["recency_w"] = np.clip(np.exp(-hours/36.0), 0.05, 1.0)
+    df["weighted_sent"] = df["sentiment"] * df["recency_w"]
+    return df
 
 # ==============================
 # Helpers to extract fields
 # ==============================
+
 def get_field(df, field, tlist):
     """Handle yfinance's MultiIndex vs single-index columns."""
     if isinstance(df.columns, pd.MultiIndex):
@@ -192,26 +296,8 @@ def get_field(df, field, tlist):
         out.columns = [t]
     return out
 
-open_df  = get_field(data, "Open", tickers)
-high_df  = get_field(data, "High", tickers)
-low_df   = get_field(data, "Low", tickers)
-close_df = get_field(data, "Adj Close" if "Adj Close" in data.columns.get_level_values(0) else "Close", tickers)
-vol_df   = get_field(data, "Volume", tickers)
+# Indicator functions
 
-# ---- Drop tickers with too few rows
-valid_cols = [t for t in close_df.columns if close_df[t].dropna().shape[0] > 30]
-if not valid_cols:
-    st.error("No valid tickers with enough data.")
-    st.stop()
-open_df  = open_df[valid_cols]
-high_df  = high_df[valid_cols]
-low_df   = low_df[valid_cols]
-close_df = close_df[valid_cols]
-vol_df   = vol_df[valid_cols]
-
-# ==============================
-# Indicators (NEW: Stochastic & ADX; Golden Cross)
-# ==============================
 def ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
 
@@ -258,24 +344,6 @@ def pct_from_52wk_ext(series, window=252):
     dist_high = (roll_high - series) / roll_high.replace(0, np.nan) * 100
     return dist_low, dist_high
 
-def pivots(series):
-    """Very quick local swing points: prev>cur<next (lows) and prev<cur>next (highs)."""
-    mins_mask = (series.shift(1) > series) & (series.shift(-1) > series)
-    maxs_mask = (series.shift(1) < series) & (series.shift(-1) < series)
-    return mins_mask.fillna(False), maxs_mask.fillna(False)
-
-def heikin_ashi(o,h,l,c):
-    """Optional visual smoothing for noisy candles (chart only)."""
-    ha_close = (o + h + l + c) / 4
-    ha_open = pd.Series(index=o.index, dtype=float)
-    ha_open.iloc[0] = (o.iloc[0] + c.iloc[0]) / 2
-    for i in range(1, len(o)):
-        ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
-    ha_high = pd.concat([h, ha_open, ha_close], axis=1).max(axis=1)
-    ha_low  = pd.concat([l, ha_open, ha_close], axis=1).min(axis=1)
-    return ha_open, ha_high, ha_low, ha_close
-
-# --- NEW: Stochastic (14,3,3)
 def stochastic(high, low, close, n=14, k=3, d=3):
     ll = low.rolling(n).min()
     hh = high.rolling(n).max()
@@ -284,7 +352,6 @@ def stochastic(high, low, close, n=14, k=3, d=3):
     D = K.rolling(d).mean()
     return K, D
 
-# --- NEW: ADX(14)
 def adx(high, low, close, n=14):
     up = high.diff()
     dn = low.diff().abs()
@@ -302,6 +369,32 @@ def adx(high, low, close, n=14):
     dx = ( (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) ) * 100
     adx_val = dx.rolling(n).mean()
     return adx_val, plus_di, minus_di
+
+# ==============================
+# Load price data
+# ==============================
+
+data = fetch_prices(tickers, period)
+if data is None or data.empty:
+    st.error("No data retrieved. Check tickers or connection.")
+    st.stop()
+
+open_df  = get_field(data, "Open", tickers)
+high_df  = get_field(data, "High", tickers)
+low_df   = get_field(data, "Low", tickers)
+close_df = get_field(data, "Adj Close" if "Adj Close" in data.columns.get_level_values(0) else "Close", tickers)
+vol_df   = get_field(data, "Volume", tickers)
+
+# ---- Drop tickers with too few rows
+valid_cols = [t for t in close_df.columns if close_df[t].dropna().shape[0] > 30]
+if not valid_cols:
+    st.error("No valid tickers with enough data.")
+    st.stop()
+open_df  = open_df[valid_cols]
+high_df  = high_df[valid_cols]
+low_df   = low_df[valid_cols]
+close_df = close_df[valid_cols]
+vol_df   = vol_df[valid_cols]
 
 # ==============================
 # Per-ticker summary (scores + key fields)
@@ -359,9 +452,8 @@ for t in valid_cols:
         ret_ytd = (price / p[ymask].iloc[0] - 1) * 100 if ymask.any() else np.nan
     except Exception:
         ret_ytd = np.nan
-    vol_21d = p.pct_change().rolling(21).std().iloc[-1] * np.sqrt(252) * 100  # annualized %
 
-    # ----- Buy/Sell Scores (add light contributions from Stoch & ADX)
+    # ----- Buy/Sell Scores
     score = 0.0
     if pd.notna(rsi14):
         score += max(0, (rsi_buy_th - rsi14)) / max(1, rsi_buy_th) * 35
@@ -411,7 +503,6 @@ for t in valid_cols:
         signal = "WAIT"
 
     rows.append({
-        # Decision-first ordering (important columns first)
         "Ticker": t,
         "Signal": signal,
         "BuyScore": buy_score,
@@ -435,13 +526,61 @@ if summary.empty:
     st.error("Not enough data to compute indicators. Try a longer window or different tickers.")
     st.stop()
 
-# ---- Reorder to decision-first columns for display
 priority_cols = [
     "Ticker","Signal","BuyScore","SellScore","Price",
     "RSI14","%B","Stoch %K","Stoch %D","ADX14","Golden Cross","GCross Recent",
     "Ret 21D %","YTD %","EMA20","SMA200"
 ]
 summary = summary[priority_cols + [c for c in summary.columns if c not in priority_cols]]
+
+# ==============================
+# Macro Regime (used later in probability)
+# ==============================
+macro = fetch_macro_series()
+
+vix_series = macro.get("vix", pd.DataFrame())
+if not vix_series.empty and "Close" in vix_series.columns:
+    vix_close = vix_series["Close"].astype(float).dropna()
+    if len(vix_close):
+        vix_now = float(np.asarray(vix_close.iloc[-1]).ravel()[0])
+        vix_pct = float(np.asarray(vix_close.rank(pct=True).iloc[-1]).ravel()[0])  # percentile in last 6m
+    else:
+        vix_now, vix_pct = np.nan, 0.5
+else:
+    vix_now, vix_pct = np.nan, 0.5
+
+spy_series = macro.get("spy", pd.DataFrame())
+spy_trend = 0.0
+try:
+    # Ensure we really have the Close column as a Series
+    if isinstance(spy_series, pd.DataFrame) and ("Close" in spy_series.columns) and not spy_series.empty:
+        spy_c = spy_series["Close"].astype(float).dropna()
+        if spy_c.shape[0] > 50:
+            spy_ema50 = ema(spy_c, 50)
+            # Safely coerce to scalars even if objects come back as 0-d arrays/Series
+            close_val = float(np.asarray(spy_c.iloc[-1]).ravel()[0])
+            ema_val   = float(np.asarray(spy_ema50.iloc[-1]).ravel()[0])
+            denom = ema_val if (np.isfinite(ema_val) and abs(ema_val) > 1e-6) else 1e-6
+            spy_trend = float(np.tanh(((close_val - ema_val) / denom) * 10))
+except Exception:
+    # Keep default 0.0 if anything odd happens
+    spy_trend = 0.0
+
+btc = macro.get("btc", pd.DataFrame())
+eth = macro.get("eth", pd.DataFrame())
+crypto_24h = 0.0
+try:
+    if not btc.empty:
+        btc_ret = (btc["Close"].iloc[-1] / btc["Close"].iloc[-24] - 1)
+    else:
+        btc_ret = 0.0
+    if not eth.empty:
+        eth_ret = (eth["Close"].iloc[-1] / eth["Close"].iloc[-24] - 1)
+    else:
+        eth_ret = 0.0
+    crypto_24h = float((btc_ret + eth_ret) / 2.0)
+except Exception:
+    crypto_24h = 0.0
 
 # ==============================
 # Top Opportunities
@@ -466,7 +605,7 @@ with left:
 # ==============================
 # Detailed chart & quick backtest
 # ==============================
-st.subheader("📊 Detailed Chart & Quick Backtest")
+st.subheader("📊 Detailed Chart, News & Decision Panel")
 selected = st.selectbox("Choose ticker:", list(summary["Ticker"]), index=0)
 
 # ---- Slice selected series
@@ -485,9 +624,9 @@ rsi_s = rsi(p, 14)
 stochK_s, stochD_s = stochastic(h, l, p, 14, 3, 3)
 adx_s, plusDI_s, minusDI_s = adx(h, l, p, 14)
 atr_s = atr(h, l, p, 14)
-mins_mask, maxs_mask = pivots(p)
 
-# ---- Per-bar Buy/Sell Scores (same as before, with volume/lenient applied)
+# ---- Per-bar scores
+
 def perbar_scores(price, rsi_series, pb_series, hist_series, vol_series):
     volr_series = (vol_series / vol_series.rolling(20).mean()).replace([np.inf, -np.inf], np.nan)
     dlow_s, dhigh_s = pct_from_52wk_ext(price)
@@ -541,10 +680,13 @@ if threshold_mode.startswith("Adaptive"):
     sell_th_use = max(20, round(sq, 1))
     st.caption(f"Adaptive BuyScore≈{buy_th_use}, SellScore≈{sell_th_use} (80th pct of last {recent} bars)")
 else:
-    buy_th_use = buy_threshold
-    sell_th_use = sell_threshold
+    buy_th_use = st.session_state.get("_buy_th_cache", None) or buy_threshold
+    sell_th_use = st.session_state.get("_sell_th_cache", None) or sell_threshold
+    st.session_state["_buy_th_cache"] = buy_th_use
+    st.session_state["_sell_th_cache"] = sell_th_use
 
 # ---- Trade generator (simple cross + ATR stop/take)
+
 def generate_trades(price, buyS, sellS, buy_th, sell_th, atr_series, atr_m, rr):
     entries, exits = [], []
     in_trade = False
@@ -573,9 +715,10 @@ def generate_trades(price, buyS, sellS, buy_th, sell_th, atr_series, atr_m, rr):
         exits.append((price.index[-1], float(price.iloc[-1])))
     return entries, exits
 
-entries, exits = generate_trades(p, buyS_s, sellS_s, buy_th_use, sell_th_use, atr_s, atr_mult, rr_target)
+entries, exits = generate_trades(p, buyS_s, sellS_s, buy_th_use, sell_th_use, atr_s,  atr_mult, rr_target)
 
 # ---- Backtest stats
+
 def quick_backtest(price, entries, exits):
     n = min(len(entries), len(exits))
     if n == 0:
@@ -618,11 +761,8 @@ with c7:
     show_vol = st.checkbox("Volume panel", value=not simple_view)
 
 # ---- Decide subplot layout dynamically
-rows = 1 + int(show_vol) + int(show_macd) + int(show_stoch) + int(show_adx) + 1  # price + optional panels + rsi
-if simple_view:
-    base = 0.55
-else:
-    base = 0.45
+rows_n = 1 + int(show_vol) + int(show_macd) + int(show_stoch) + int(show_adx) + 1  # price + optional panels + rsi
+base = 0.55 if simple_view else 0.45
 row_heights = [base]
 for flag in [show_vol, show_macd, show_stoch, show_adx]:
     if flag: row_heights.append(0.14)
@@ -636,14 +776,14 @@ if show_adx:   titles.append("ADX")
 titles.append("RSI")
 
 fig = make_subplots(
-    rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+    rows=rows_n, cols=1, shared_xaxes=True, vertical_spacing=0.03,
     row_heights=row_heights, subplot_titles=titles
 )
 
 # ---- Row indices
 row_idx = 1
 
-# ---- Price row (candles + key overlays + markers)
+# ---- Price row (candles + key overlays)
 fig.add_trace(go.Candlestick(x=p.index, open=o, high=h, low=l, close=p, name="Price"),
               row=row_idx, col=1)
 
@@ -721,13 +861,195 @@ else:
     st.info("No trades with current thresholds. Try **Lenient mode** or **Adaptive thresholds**.")
 
 # ==============================
+# 📰 News + Sentiment Table (selected ticker)
+# ==============================
+st.markdown("### 📰 News & Sentiment (last ~7 days)")
+news_df = get_news_with_sentiment(selected)
+if news_df.empty:
+    st.info("No news fetched from Yahoo/Google RSS. (Network or ticker issue)")
+else:
+    show_cols = ["published", "source", "sentiment", "policy_risk", "title"]
+    nd = news_df[show_cols].copy()
+    nd = nd.rename(columns={"published":"Time (UTC)", "source":"Source", "sentiment":"Sent (-1..1)", "policy_risk":"PolicyRisk"})
+    st.dataframe(nd, use_container_width=True, hide_index=True)
+
+# ==============================
+# 🎯 Decision Panel — Probability next move is UP
+# ==============================
+st.markdown("### 🎯 Decision Panel — Up/Down Likelihood (real-time)")
+
+# NEW: Dedicated dropdown for probability ticker (your shortlist)
+prob_list_raw = ["HOOD","NVDIA","AMD","META","AMAT","TSLA","AMZA","MSFT"]
+ALIAS = {"NVDIA":"NVDA"}  # common typo fix
+prob_list = [ALIAS.get(x, x) for x in prob_list_raw]
+pt = st.selectbox("Select ticker for probability:", prob_list, index=0)
+if "NVDIA" in prob_list_raw and pt == "NVDA":
+    st.caption("Note: corrected 'NVDIA' → 'NVDA'.")
+
+# Helper to ensure we have series for any ticker (even if not in the main table)
+def ensure_ticker_series(ticker: str):
+    try:
+        if ticker in close_df.columns:
+            p = close_df[ticker].dropna()
+            o = open_df[ticker].reindex(p.index)
+            h = high_df[ticker].reindex(p.index)
+            l = low_df[ticker].reindex(p.index)
+            v = vol_df[ticker].reindex(p.index).fillna(0)
+        else:
+            extra = fetch_prices([ticker], period)
+            if extra is None or extra.empty:
+                return None
+            oDf = get_field(extra, "Open", [ticker])
+            hDf = get_field(extra, "High", [ticker])
+            lDf = get_field(extra, "Low", [ticker])
+            cDf = get_field(extra, "Adj Close" if "Adj Close" in extra.columns.get_level_values(0) else "Close", [ticker])
+            vDf = get_field(extra, "Volume", [ticker])
+            # Each are single-column frames — align on index
+            p = cDf[ticker].dropna()
+            o = oDf[ticker].reindex(p.index)
+            h = hDf[ticker].reindex(p.index)
+            l = lDf[ticker].reindex(p.index)
+            v = vDf[ticker].reindex(p.index).fillna(0)
+        if p is None or p.empty or p.shape[0] < 30:
+            return None
+        return o, h, l, p, v
+    except Exception:
+        return None
+
+_series = ensure_ticker_series(pt)
+if _series is None:
+    st.warning(f"Could not load adequate price data for {pt}. Try another ticker or a longer window.")
+else:
+    o_pt, h_pt, l_pt, p_pt, v_pt = _series
+
+    # Compute indicator series for the chosen probability ticker
+    ema20_pt = ema(p_pt, 20)
+    sma200_pt = p_pt.rolling(200).mean()
+    _, _, _, pb_pt = bollinger(p_pt, 20, 2)
+    _, _, hist_pt = macd(p_pt)
+    rsi_pt = rsi(p_pt, 14)
+
+    # Per-bar scores (reuse function)
+    buyS_pt, sellS_pt = perbar_scores(p_pt, rsi_pt, pb_pt, hist_pt, v_pt)
+
+    # 1) Technical edge from last bar
+    last_buy = float(buyS_pt.iloc[-1]) if len(buyS_pt) else 0.0
+    last_sell = float(sellS_pt.iloc[-1]) if len(sellS_pt) else 0.0
+    tech_edge = (last_buy - last_sell) / 100.0  # -1..1
+
+    # 2) News sentiment edge for selected ticker (weighted last 72h)
+    news_df_pt = get_news_with_sentiment(pt)
+    news_edge = 0.0
+    policy_hit = False
+    if not news_df_pt.empty:
+        recent_pt = news_df_pt[(pd.Timestamp.now(tz=timezone.utc) - news_df_pt["published"]) <= pd.Timedelta(hours=72)]
+        if recent_pt.empty:
+            recent_pt = news_df_pt.head(10)
+        news_edge = float(np.tanh(recent_pt["weighted_sent"].sum()))
+        policy_hit = bool(recent_pt["policy_risk"].any())
+
+    # 3) Macro regime: reuse already-computed globals (vix_pct, spy_trend, crypto_24h)
+    macro_edge = 0.0
+    try:
+        vix_val = float(np.asarray(vix_pct).ravel()[0])
+        if np.isfinite(vix_val):
+            macro_edge += -0.8 * float(np.maximum(0.0, vix_val - 0.5))
+    except Exception:
+        pass
+    try:
+        st_spy_trend = float(np.asarray(spy_trend).ravel()[0])
+        if np.isfinite(st_spy_trend):
+            macro_edge += 0.4 * st_spy_trend
+    except Exception:
+        pass
+    if pt in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
+        macro_edge += 0.6 * np.tanh(crypto_24h * 10)
+
+    # 4) Volume impulse (today vs 20D avg)
+    try:
+        vol_ratio_last = float((v_pt.iloc[-1] / v_pt.rolling(20).mean().iloc[-1]))
+        vol_edge = 0.3 * np.tanh((vol_ratio_last - 1.0) * 1.2)
+    except Exception:
+        vol_edge = 0.0
+
+    # 5) Policy risk penalty if triggered in recent headlines
+    policy_penalty = -0.25 if policy_hit else 0.0
+
+    # Combine (logistic)
+    z = 1.6*tech_edge + 0.7*news_edge + 0.6*macro_edge + 0.3*vol_edge + policy_penalty
+    prob_up = 1.0 / (1.0 + math.exp(-z))
+    prob_up_pct = round(prob_up * 100.0, 1)
+
+    # ---- Gauge
+    fig_prob = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = prob_up_pct,
+        title = {"text": f"{pt} — Chance Up (next session)"},
+        number = {"suffix":"%"},
+        gauge = {
+            "axis": {"range": [0, 100]},
+            "bar": {"thickness": 0.25},
+            "steps": [
+                {"range": [0, 40],  "color": "#ffcccc"},
+                {"range": [40, 60], "color": "#fff4cc"},
+                {"range": [60, 100],"color": "#d8f5d0"}
+            ],
+            "threshold": {"line": {"width": 4}, "thickness": 0.8, "value": prob_up_pct}
+        }
+    ))
+    fig_prob.update_layout(height=240, margin=dict(l=10,r=10,t=40,b=10))
+    st.plotly_chart(fig_prob, use_container_width=True)
+
+    # ---- Reasons panel
+    bull_pts, bear_pts = [], []
+    if tech_edge > 0: bull_pts.append("Technical scores favor BUY over SELL")
+    else: bear_pts.append("Technical scores lean to SELL/Trim")
+
+    if news_edge > 0.05: bull_pts.append("News sentiment positive (recent headlines)")
+    elif news_edge < -0.05: bear_pts.append("News sentiment negative (recent headlines)")
+
+    try:
+        if np.isfinite(vix_val) and vix_val > 0.7:
+            bear_pts.append("VIX elevated vs 6m (volatility risk)")
+    except Exception:
+        pass
+
+    try:
+        if st_spy_trend > 0.1: bull_pts.append("SPY above trend (risk-on)")
+        elif st_spy_trend < -0.1: bear_pts.append("SPY below trend (risk-off)")
+    except Exception:
+        pass
+
+    if pt in {"HOOD","COIN","MSTR","MARA","RIOT","PYPL","SQ"}:
+        if crypto_24h > 0: bull_pts.append("Crypto 24h up (supportive for flow-sensitive names)")
+        elif crypto_24h < 0: bear_pts.append("Crypto 24h down (headwind)")
+
+    if policy_hit: bear_pts.append("Policy/tariff/regulatory headline detected — caution")
+
+    colL, colR = st.columns(2)
+    with colL:
+        st.markdown("**Bullish factors**")
+        st.markdown("
+".join([f"- {x}" for x in bull_pts]) if bull_pts else "- (none strong)")
+    with colR:
+        st.markdown("**Bearish factors**")
+        st.markdown("
+".join([f"- {x}" for x in bear_pts]) if bear_pts else "- (none strong)")
+
+# ==============================
 # Tips (short)
+# ==============================
 # ==============================
 with st.expander("💡 Quick tips"):
     st.markdown(
         "- **BUY**: BuyScore rising, MACD hist flips positive, %B ~ 0–0.35, RSI below threshold, Stoch %K < 20, ADX>25 helpful, Vol Ratio > 1 if possible.\n"
         "- **SELL/Trim**: SellScore high, %B ~ 0.75–1.0, RSI > 65–70, Stoch %K > 80, MACD hist falling/negative, near 52w high.\n"
-        "- **Golden Cross** adds long bias; **Death Cross** adds caution.\n"
+        "- **Probability gauge** is a blend of **technical**, **news sentiment**, **macro**, **volume**, and **policy risk**.\n"
         "- Quiet sessions → **Lenient mode** or **Adaptive thresholds**.\n"
         "- Always cross-check with broader context (earnings, news)."
     )
+
+# ==============================
+# Footer — safety note
+# ==============================
+st.caption("This tool is educational only. Markets can move fast; probabilities are not guarantees.")
