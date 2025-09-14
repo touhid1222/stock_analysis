@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Market Decision Dashboard — Plotly Dash (stable, no html.Style)
-- Responsive tiles (assets/app.css)
-- News tape, intraday 5m drift tie-breaker, ATR sizing
-- Price chart: EMA20/EMA50/SMA200, Bollinger, Golden/Death Cross, RSI(14)
-
-Run:
-  python app.py  ->  http://127.0.0.1:8080
+marketdash.utils
+Shared utilities for the Market Decision Dashboard:
+- yfinance fetching with retry
+- indicators (EMA, RSI, MACD, Bollinger, ATR)
+- news fetch + sentiment + recency weighting
+- macro fetch (VIX, SPY)
+- intraday 5m drift
+- probability blend + ATR position sizing
+- chart builders (price+RSI, gauge) and placeholder figure
 """
-import math
+
+# utils.py
+
+import math, time
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -19,23 +24,37 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-import dash
-from dash import Dash, dcc, html
-from dash.dependencies import Input, Output, State
-import dash_bootstrap_components as dbc
-
-# ---------------- Config ----------------
-DEFAULT_TICKERS = ["HOOD", "NVDA", "AMD", "META", "AMAT", "TSLA", "AMZA", "MSFT"]
-ALIAS = {"NVDIA": "NVDA"}  # common typo
-
-# Optional sentiment (falls back to heuristic if not present)
+# Optional sentiment; safe fallback if not present
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
     _VADER = SentimentIntensityAnalyzer()
 except Exception:
     _VADER = None
 
-# ---------------- Indicators ----------------
+
+# ---------------- Small general helpers ----------------
+def retry(fn, tries: int = 2, sleep: float = 0.8, default=None):
+    for i in range(max(1, tries)):
+        try:
+            return fn()
+        except Exception:
+            if i < tries - 1:
+                time.sleep(sleep)
+            else:
+                return default
+
+def empty_figure(title: str = "No data", height: int = 300) -> go.Figure:
+    fig = go.Figure()
+    fig.update_layout(
+        title=title, height=height, margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+    )
+    fig.add_annotation(text=title, x=0.5, y=0.5, showarrow=False)
+    return fig
+
+
+# ---------------- Technical indicators ----------------
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
@@ -67,12 +86,20 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.Se
     tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
-# ---------------- Data helpers ----------------
+
+# ---------------- Data helpers (with retry) ----------------
 def fetch_prices(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    return yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
+    def _call():
+        return yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
+    df = retry(_call, tries=2, sleep=0.7, default=pd.DataFrame())
+    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
 def fetch_prices_multi(tickers: List[str], period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    return yf.download(tickers, period=period, interval=interval, auto_adjust=False, progress=False)
+    def _call():
+        return yf.download(tickers, period=period, interval=interval, auto_adjust=False, progress=False)
+    df = retry(_call, tries=2, sleep=0.7, default=pd.DataFrame())
+    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
 
 # ---------------- News & Sentiment ----------------
 def fetch_news_yf(ticker: str) -> pd.DataFrame:
@@ -102,7 +129,6 @@ def fetch_news_google(ticker: str) -> pd.DataFrame:
                 link  = item.findtext("link") or ""
                 pub   = item.findtext("pubDate") or ""
                 try:
-                    # e.g. "Sat, 13 Sep 2025 15:10:00 GMT"
                     published = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=timezone.utc)
                 except Exception:
                     published = None
@@ -146,22 +172,19 @@ def get_news_with_sentiment(ticker: str) -> pd.DataFrame:
     df["weighted_sent"] = df["sentiment"] * df["recency_w"]
     return df
 
+
 # ---------------- Macro ----------------
 def fetch_macro() -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
-    try:
-        out["vix"] = yf.download("^VIX", period="6mo", interval="1d", auto_adjust=False, progress=False)
-    except Exception:
-        out["vix"] = pd.DataFrame()
-    try:
-        out["spy"] = yf.download("SPY", period="12mo", interval="1d", auto_adjust=False, progress=False)
-    except Exception:
-        out["spy"] = pd.DataFrame()
+    out["vix"] = retry(lambda: yf.download("^VIX", period="6mo", interval="1d", auto_adjust=False, progress=False),
+                       tries=2, default=pd.DataFrame())
+    out["spy"] = retry(lambda: yf.download("SPY", period="12mo", interval="1d", auto_adjust=False, progress=False),
+                       tries=2, default=pd.DataFrame())
     return out
+
 
 # ---------------- Intraday helpers ----------------
 def intraday_drift_5m(ticker: str) -> Tuple[Optional[float], Optional[float], bool]:
-    """Return (last_60m_drift, session_drift, market_active_flag). Uses 5m bars."""
     try:
         df = fetch_prices(ticker, period="5d", interval="5m")
         if df is None or df.empty:
@@ -171,19 +194,15 @@ def intraday_drift_5m(ticker: str) -> Tuple[Optional[float], Optional[float], bo
         if last_ts.tz is None:
             last_ts = last_ts.tz_localize("UTC")
         active = (datetime.now(timezone.utc) - last_ts) <= timedelta(minutes=20)
-
-        # 60m drift (12 bars)
         drift_60 = float(c.iloc[-1] / c.iloc[-13] - 1.0) if len(c) >= 13 else None
-
-        # session drift: last vs today's first bar
         today_mask = (c.index.date == c.index[-1].date())
         drift_sess = float(c.iloc[-1] / c.loc[today_mask].iloc[0] - 1.0) if today_mask.any() else None
-
         return drift_60, drift_sess, bool(active)
     except Exception:
         return None, None, False
 
-# ---------------- Probability & Reasons ----------------
+
+# ---------------- Probability blend + sizing ----------------
 def compute_probability_and_reasons(
     ticker: str,
     capital: float = 10000.0,
@@ -216,11 +235,11 @@ def compute_probability_and_reasons(
     macd_rel = np.tanh(hist_v * 5)
     tech_edge = 0.55*ema_rel + 0.30*rsi_rel + 0.15*macd_rel
 
-    # News edge (recent dominates)
+    # News edge (recency-weighted)
     news_df = get_news_with_sentiment(ticker)
     news_edge = float(np.tanh(news_df["weighted_sent"].sum())) if (isinstance(news_df, pd.DataFrame) and not news_df.empty) else 0.0
 
-    # Macro
+    # Macro edge
     macro = fetch_macro(); vix = macro.get("vix", pd.DataFrame()); spy = macro.get("spy", pd.DataFrame())
     macro_edge = 0.0
     if not vix.empty and "Close" in vix.columns:
@@ -229,7 +248,8 @@ def compute_probability_and_reasons(
             vix_pct = float(np.asarray(vclose.rank(pct=True).iloc[-1]).ravel()[0])
             macro_edge += -0.8*max(0.0, vix_pct-0.5)
     if not spy.empty and "Close" in spy.columns and spy["Close"].shape[0] > 50:
-        sc = spy["Close"].astype(float).dropna(); se50 = ema(sc, 50)
+        sc = spy["Close"].astype(float).dropna()
+        se50 = ema(sc, 50)
         s_trend = float(np.tanh(((float(sc.iloc[-1])-float(se50.iloc[-1]))/max(1e-6, float(se50.iloc[-1]))) * 10))
         macro_edge += 0.5*s_trend
 
@@ -241,7 +261,7 @@ def compute_probability_and_reasons(
     if active and (drifts is not None):
         intra_edge += 0.20 * float(np.tanh(drifts * 10))
 
-    # Blend → probability
+    # Blend -> probability
     z = 1.25*news_edge + 0.90*tech_edge + 0.50*macro_edge + intra_edge
     prob_up = 1.0 / (1.0 + math.exp(-z))
 
@@ -273,15 +293,21 @@ def compute_probability_and_reasons(
     }
     return prob_up, {"meta": meta, "series": series, "news": news_df}
 
-# ---------------- Charts ----------------
-def price_with_rsi_chart(series: Dict[str, pd.Series], ticker: str, price: float, meta: Dict[str, Any]) -> go.Figure:
+
+# ---------------- Chart builders ----------------
+def price_with_rsi_chart(series: Dict[str, pd.Series], ticker: str, price: float) -> go.Figure:
+    if not series or "p" not in series or series["p"] is None or series["p"].empty:
+        return empty_figure(title=f"{ticker}: no price data", height=640)
+
     p, o, h, l = series["p"], series["o"], series["h"], series["l"]
     ema20, ema50, sma200 = series["ema20"], series["ema50"], series["sma200"]
     upBB, loBB, rsi_s = series["upBB"], series["loBB"], series["rsi"]
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04,
-                        row_heights=[0.72, 0.28], subplot_titles=(f"{ticker} — Price & Signals", "RSI(14)"))
-
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        row_heights=[0.72, 0.28],
+        subplot_titles=(f"{ticker} — Price & Signals", "RSI(14)")
+    )
     # Price panel
     fig.add_trace(go.Candlestick(x=p.index, open=o, high=h, low=l, close=p, name="Price"), row=1, col=1)
     fig.add_trace(go.Scatter(x=p.index, y=ema20, name="EMA20", line=dict(width=1.8)), row=1, col=1)
@@ -290,23 +316,10 @@ def price_with_rsi_chart(series: Dict[str, pd.Series], ticker: str, price: float
     fig.add_trace(go.Scatter(x=p.index, y=upBB, name="Upper BB", line=dict(dash="dot", width=1)), row=1, col=1)
     fig.add_trace(go.Scatter(x=p.index, y=loBB, name="Lower BB", line=dict(dash="dot", width=1)), row=1, col=1)
 
-    # Current price line
+    # Current price
     fig.add_hline(y=price, line=dict(color="#666", width=1, dash="dot"), row=1, col=1)
     fig.add_annotation(x=p.index[-1], y=price, xanchor="right", yanchor="bottom",
                        text=f" ${price:,.2f}", showarrow=False, font=dict(size=14))
-
-    # Golden/Death Cross badge (safe)
-    try:
-        sma50_s = p.rolling(50).mean()
-        sma200_s = p.rolling(200).mean()
-        if pd.notna(sma50_s.iloc[-1]) and pd.notna(sma200_s.iloc[-1]):
-            badge = "Golden Cross" if sma50_s.iloc[-1] > sma200_s.iloc[-1] else "Death Cross"
-            y_badge = float(sma200.iloc[-1]) if pd.notna(sma200.iloc[-1]) else float(p.iloc[-1])
-            fig.add_annotation(x=p.index[-1], y=y_badge, text=badge,
-                               showarrow=True, arrowhead=1, ax=0, ay=-40,
-                               bgcolor="#f2f2f2", bordercolor="#999", font=dict(size=12))
-    except Exception:
-        pass
 
     # RSI panel
     fig.add_trace(go.Scatter(x=p.index, y=rsi_s, name="RSI14", line=dict(width=1.8)), row=2, col=1)
@@ -342,26 +355,56 @@ def probability_gauge(ticker: str, pct: float, mini: bool = False) -> go.Figure:
     fig.update_layout(autosize=False, height=320 if not mini else 210, margin=dict(l=10, r=10, t=40, b=6))
     return fig
 
-# ---------------- Dash App ----------------
+# app.py
+# -*- coding: utf-8 -*-
+"""
+Market Decision Dashboard — modular (imports from marketdash.utils)
+Run:
+  python app.py  ->  http://127.0.0.1:8080
+"""
+
+from typing import List
+import pandas as pd
+import dash
+from dash import Dash, dcc, html
+from dash.dependencies import Input, Output, State
+import dash_bootstrap_components as dbc
+
+from marketdash.utils import (
+    compute_probability_and_reasons,
+    price_with_rsi_chart,
+    probability_gauge,
+)
+
+DEFAULT_TICKERS: List[str] = ["HOOD", "NVDA", "AMD", "META", "AMAT", "TSLA", "AMZA", "MSFT"]
+ALIAS = {"NVDIA": "NVDA"}  # common typo
+
 external_stylesheets = [dbc.themes.FLATLY]
 app: Dash = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 server = app.server
 
+# ---- Controls
 controls = dbc.Card([
     dbc.CardHeader("Controls"),
     dbc.CardBody([
         dbc.Row([
             dbc.Col([
                 html.Label("Detail ticker", style={"fontWeight": 600}),
-                dcc.Dropdown(id="detail-ticker",
-                             options=[{"label": t, "value": t} for t in DEFAULT_TICKERS],
-                             value=DEFAULT_TICKERS[0], clearable=False)
+                dcc.Dropdown(
+                    id="detail-ticker",
+                    options=[{"label": t, "value": t} for t in DEFAULT_TICKERS],
+                    value=DEFAULT_TICKERS[0],
+                    clearable=False
+                )
             ], xs=12, sm=6, md=4, lg=3),
             dbc.Col([
                 html.Label("Tiles (watchlist)", style={"fontWeight": 600}),
-                dcc.Dropdown(id="tile-tickers",
-                             options=[{"label": t, "value": t} for t in DEFAULT_TICKERS],
-                             value=DEFAULT_TICKERS, multi=True)
+                dcc.Dropdown(
+                    id="tile-tickers",
+                    options=[{"label": t, "value": t} for t in DEFAULT_TICKERS],
+                    value=DEFAULT_TICKERS,
+                    multi=True
+                )
             ], xs=12, sm=12, md=8, lg=6),
             dbc.Col([
                 html.Button("Refresh", id="refresh", className="btn btn-primary", style={"marginTop": "28px"})
@@ -389,13 +432,20 @@ controls = dbc.Card([
     ])
 ], className="mb-3")
 
+# ---- Layout
+def _graph(id_, height_px):
+    return dcc.Loading(
+        dcc.Graph(id=id_, className="graph-100", style={"height": f"{height_px}px"}, config={"responsive": True}),
+        type="dot"
+    )
+
 app.layout = dbc.Container([
     html.H2("📈 Market Decision Dashboard — Responsive", style={"fontSize": "28px", "fontWeight": 700}),
     controls,
     dbc.Row([
-        dbc.Col(dcc.Graph(id="detail-chart", className="graph-100", style={"height": "640px"}), lg=8, md=12),
+        dbc.Col(_graph("detail-chart", 640), lg=8, md=12),
         dbc.Col([
-            dcc.Graph(id="detail-gauge", className="graph-100", style={"height": "320px"}),
+            _graph("detail-gauge", 320),
             html.Div(id="news-tape", className="mt-2"),
             dbc.Card([
                 dbc.CardHeader("Position Sizing (ATR)"),
@@ -408,32 +458,36 @@ app.layout = dbc.Container([
     dbc.Row(id="tiles-row", className="g-3"),
 ], fluid=True)
 
-# ---------------- Callbacks ----------------
+# ---- Callbacks
 @app.callback(
     [Output("detail-chart", "figure"),
      Output("detail-gauge", "figure"),
      Output("news-tape", "children"),
      Output("sizing-box", "children")],
     [Input("detail-ticker", "value"), Input("refresh", "n_clicks")],
-    [State("capital", "value"), State("risk_pct", "value"),
-     State("atr_mult", "value"), State("rr_target", "value")]
+    [State("capital", "value"), State("risk_pct", "value"), State("atr_mult", "value"), State("rr_target", "value")]
 )
 def update_detail(ticker, _n, capital, risk_pct, atr_mult, rr_target):
     t = (ALIAS.get(ticker, ticker) if ticker else DEFAULT_TICKERS[0])
-    _, out = compute_probability_and_reasons(
+    prob, out = compute_probability_and_reasons(
         t,
         capital=float(capital or 10000),
         risk_pct=float(risk_pct or 1.0),
         atr_mult=float(atr_mult or 1.5),
         rr_target=float(rr_target or 1.5),
     )
-    meta, series, news = out.get("meta", {}), out.get("series", {}), out.get("news", pd.DataFrame())
+    if "error" in out:
+        # placeholders
+        from marketdash.utils import empty_figure, probability_gauge
+        empty = empty_figure(f"{t}: data not available", height=640)
+        gauge = probability_gauge(t, 50.0, mini=False)
+        return empty, gauge, html.Div("(no recent headlines)"), [html.Div("ATR(14): n/a")]
 
-    fig_chart = price_with_rsi_chart(series, meta.get("ticker", t),
-                                     float(meta.get("price", series["p"].iloc[-1])), meta)
+    meta, series, news = out.get("meta", {}), out.get("series", {}), out.get("news", pd.DataFrame())
+    fig_chart = price_with_rsi_chart(series, meta.get("ticker", t), float(meta.get("price", 0.0) or series["p"].iloc[-1]))
     fig_gauge = probability_gauge(meta.get("ticker", t), meta.get("prob_pct", 50.0), mini=False)
 
-    # News tape (top 5)
+    # News tape
     items = []
     if isinstance(news, pd.DataFrame) and not news.empty:
         for _, row in news.head(5).iterrows():
@@ -444,10 +498,9 @@ def update_detail(ticker, _n, capital, risk_pct, atr_mult, rr_target):
                 ts_txt = pd.to_datetime(ts).strftime("%b %d %H:%M") if pd.notna(ts) else ""
             except Exception:
                 ts_txt = ""
-            title_txt = str(row.get("title", ""))
             items.append(html.Li([
                 html.Span(ts_txt + " — "),
-                html.Span(title_txt, style={"color": col})
+                html.Span(str(row.get("title", "")), style={"color": col})
             ], style={"fontSize": "0.92rem", "marginBottom": "4px"}))
     news_children = [html.Strong("News (last 5)"), html.Ul(items)] if items else html.Div("(no recent headlines)")
 
@@ -475,6 +528,7 @@ def update_detail(ticker, _n, capital, risk_pct, atr_mult, rr_target):
     [Input("tile-tickers", "value"), Input("refresh", "n_clicks")]
 )
 def update_tiles(tickers, _n):
+    from marketdash.utils import probability_gauge
     if not tickers:
         tickers = DEFAULT_TICKERS
     tiles = []
@@ -485,8 +539,9 @@ def update_tiles(tickers, _n):
             fig = probability_gauge(meta.get("ticker", t), meta.get("prob_pct", 50.0), mini=True)
         except Exception:
             fig = probability_gauge(t, 50.0, mini=True)
-        tiles.append(dbc.Col(dcc.Graph(figure=fig, className="graph-100 tile-graph"),
-                             xs=12, sm=6, md=4, lg=3))
+        card = dbc.Card(dcc.Graph(figure=fig, className="graph-100 tile-graph", config={"responsive": True}),
+                        className="tile-card h-100")
+        tiles.append(dbc.Col(card, xs=12, sm=6, md=4, lg=3))
     return tiles
 
 if __name__ == "__main__":
@@ -494,32 +549,27 @@ if __name__ == "__main__":
 
 
 # assets/app.css
-/* Make graphs fill their columns and keep tiles compact on laptops/tablets */
+"""assets/app.css
+/* Fill columns */
 .graph-100 { width: 100%; }
 
-@media (max-width: 992px) { /* laptops/medium screens */
-  .tile-graph { height: 220px !important; }
-}
+/* Force a stable height for tile graphs & cards */
+.tile-card { min-height: 230px; }
+.tile-graph { height: 210px !important; }
 
-@media (max-width: 768px) { /* tablets */
+@media (max-width: 1200px) {
+  .tile-card { min-height: 220px; }
   .tile-graph { height: 200px !important; }
 }
-
-
-"""your_project/
-  app.py
-  assets/
-    app.css
+@media (max-width: 992px) { /* laptops */
+  .tile-card { min-height: 210px; }
+  .tile-graph { height: 190px !important; }
+}
+@media (max-width: 768px) { /* tablets/phones */
+  .tile-card { min-height: 200px; }
+  .tile-graph { height: 180px !important; }
+}
 """
 
-# requirements.txt
-"""dash>=2.14,<3
-dash-bootstrap-components>=1.5,<2
-plotly>=5.20,<6
-yfinance>=0.2.40
-pandas>=2.0
-numpy>=1.24
-requests>=2.31
-vaderSentiment>=3.3  # optional; app works without it
-"""
+
 
