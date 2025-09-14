@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Market Decision Dashboard — Plotly Dash (fixed, error-free)
-- Removes f-string index_string (the source of your error)
-- Injects CSS via html.Style() in layout (safe)
-- Responsive tiles (no overlap), news tape, intraday drift, ATR sizing
-- Top chart: EMA20/EMA50/SMA200, Bollinger, Golden/Death Cross badge, RSI(14)
+Market Decision Dashboard — Plotly Dash (stable, no html.Style)
+- Responsive tiles (assets/app.css)
+- News tape, intraday 5m drift tie-breaker, ATR sizing
+- Price chart: EMA20/EMA50/SMA200, Bollinger, Golden/Death Cross, RSI(14)
 
 Run:
   python app.py  ->  http://127.0.0.1:8080
@@ -103,7 +102,7 @@ def fetch_news_google(ticker: str) -> pd.DataFrame:
                 link  = item.findtext("link") or ""
                 pub   = item.findtext("pubDate") or ""
                 try:
-                    # RSS uses e.g. "Sat, 13 Sep 2025 15:10:00 GMT"
+                    # e.g. "Sat, 13 Sep 2025 15:10:00 GMT"
                     published = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=timezone.utc)
                 except Exception:
                     published = None
@@ -140,7 +139,7 @@ def get_news_with_sentiment(ticker: str) -> pd.DataFrame:
     df["sentiment"] = df["title"].astype(str).apply(_sent)
     now = datetime.now(timezone.utc)
     hrs = (now - df["published"]).dt.total_seconds().div(3600).fillna(999)
-    fast = np.exp(-np.clip(hrs, 0, 6)/2.0)       # 0-6h
+    fast = np.exp(-np.clip(hrs, 0, 6)/2.0)       # 0-6h strongest
     mid  = np.exp(-np.clip(hrs-6, 0, 18)/6.0)    # 6-24h
     slow = np.exp(-np.clip(hrs-24, 0, 48)/18.0)  # 24-72h
     df["recency_w"] = np.clip(0.6*fast + 0.3*mid + 0.1*slow, 0.05, 1.0)
@@ -219,7 +218,7 @@ def compute_probability_and_reasons(
 
     # News edge (recent dominates)
     news_df = get_news_with_sentiment(ticker)
-    news_edge = float(np.tanh(news_df["weighted_sent"].sum())) if (news_df is not None and not news_df.empty) else 0.0
+    news_edge = float(np.tanh(news_df["weighted_sent"].sum())) if (isinstance(news_df, pd.DataFrame) and not news_df.empty) else 0.0
 
     # Macro
     macro = fetch_macro(); vix = macro.get("vix", pd.DataFrame()); spy = macro.get("spy", pd.DataFrame())
@@ -296,13 +295,14 @@ def price_with_rsi_chart(series: Dict[str, pd.Series], ticker: str, price: float
     fig.add_annotation(x=p.index[-1], y=price, xanchor="right", yanchor="bottom",
                        text=f" ${price:,.2f}", showarrow=False, font=dict(size=14))
 
-    # Golden/Death Cross badge (if enough data)
+    # Golden/Death Cross badge (safe)
     try:
-        sma50 = p.rolling(50).mean()
+        sma50_s = p.rolling(50).mean()
         sma200_s = p.rolling(200).mean()
-        if pd.notna(sma50.iloc[-1]) and pd.notna(sma200_s.iloc[-1]):
-            badge = "Golden Cross" if sma50.iloc[-1] > sma200_s.iloc[-1] else "Death Cross"
-            fig.add_annotation(x=p.index[-1], y=float(sma200.iloc[-1]), text=badge,
+        if pd.notna(sma50_s.iloc[-1]) and pd.notna(sma200_s.iloc[-1]):
+            badge = "Golden Cross" if sma50_s.iloc[-1] > sma200_s.iloc[-1] else "Death Cross"
+            y_badge = float(sma200.iloc[-1]) if pd.notna(sma200.iloc[-1]) else float(p.iloc[-1])
+            fig.add_annotation(x=p.index[-1], y=y_badge, text=badge,
                                showarrow=True, arrowhead=1, ax=0, ay=-40,
                                bgcolor="#f2f2f2", bordercolor="#999", font=dict(size=12))
     except Exception:
@@ -347,17 +347,6 @@ external_stylesheets = [dbc.themes.FLATLY]
 app: Dash = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 server = app.server
 
-# Small CSS to prevent overlap and ensure graphs fill the column width
-APP_CSS = """
-.graph-100 { width: 100%; }
-@media (max-width: 992px) { /* laptops/medium screens */
-  .tile-graph { height: 220px !important; }
-}
-@media (max-width: 768px) { /* tablets */
-  .tile-graph { height: 200px !important; }
-}
-"""
-
 controls = dbc.Card([
     dbc.CardHeader("Controls"),
     dbc.CardBody([
@@ -401,11 +390,7 @@ controls = dbc.Card([
 ], className="mb-3")
 
 app.layout = dbc.Container([
-    # SAFE CSS injection (no f-strings)
-    html.Style(APP_CSS),
-
-    html.H2("📈 Market Decision Dashboard — Responsive",
-            style={"fontSize": "28px", "fontWeight": 700}),
+    html.H2("📈 Market Decision Dashboard — Responsive", style={"fontSize": "28px", "fontWeight": 700}),
     controls,
     dbc.Row([
         dbc.Col(dcc.Graph(id="detail-chart", className="graph-100", style={"height": "640px"}), lg=8, md=12),
@@ -455,7 +440,10 @@ def update_detail(ticker, _n, capital, risk_pct, atr_mult, rr_target):
             sent = float(row.get("sentiment", 0.0))
             col = "#228B22" if sent > 0.2 else ("#B22222" if sent < -0.2 else "#555")
             ts = row.get("published")
-            ts_txt = pd.to_datetime(ts).strftime("%b %d %H:%M") if pd.notna(ts) else ""
+            try:
+                ts_txt = pd.to_datetime(ts).strftime("%b %d %H:%M") if pd.notna(ts) else ""
+            except Exception:
+                ts_txt = ""
             title_txt = str(row.get("title", ""))
             items.append(html.Li([
                 html.Span(ts_txt + " — "),
@@ -503,3 +491,35 @@ def update_tiles(tickers, _n):
 
 if __name__ == "__main__":
     app.run_server(host="127.0.0.1", port=8080, debug=False)
+
+
+# assets/app.css
+/* Make graphs fill their columns and keep tiles compact on laptops/tablets */
+.graph-100 { width: 100%; }
+
+@media (max-width: 992px) { /* laptops/medium screens */
+  .tile-graph { height: 220px !important; }
+}
+
+@media (max-width: 768px) { /* tablets */
+  .tile-graph { height: 200px !important; }
+}
+
+
+"""your_project/
+  app.py
+  assets/
+    app.css
+"""
+
+# requirements.txt
+"""dash>=2.14,<3
+dash-bootstrap-components>=1.5,<2
+plotly>=5.20,<6
+yfinance>=0.2.40
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+vaderSentiment>=3.3  # optional; app works without it
+"""
+
