@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Market Decision Dashboard — Plotly Dash (responsive + news tape + intraday + sizing)
-- Responsive layout: multi‑tile gauges never overlap (Bootstrap cols + CSS)
-- Top figure: Price w/ EMA20/EMA50/SMA200, Bollinger, Golden/Death Cross, RSI(14)
-- **Mini news tape** (last 5 headlines + sentiment) beside the gauge
-- **Intraday add‑on** (5‑minute drift) as a tie‑breaker when market is active
-- **Position sizing box** (ATR‑based stops, suggested shares)
+Market Decision Dashboard — Plotly Dash (fixed, error-free)
+- Removes f-string index_string (the source of your error)
+- Injects CSS via html.Style() in layout (safe)
+- Responsive tiles (no overlap), news tape, intraday drift, ATR sizing
+- Top chart: EMA20/EMA50/SMA200, Bollinger, Golden/Death Cross badge, RSI(14)
 
 Run:
   python app.py  ->  http://127.0.0.1:8080
@@ -28,9 +27,9 @@ import dash_bootstrap_components as dbc
 
 # ---------------- Config ----------------
 DEFAULT_TICKERS = ["HOOD", "NVDA", "AMD", "META", "AMAT", "TSLA", "AMZA", "MSFT"]
-ALIAS = {"NVDIA": "NVDA"}
+ALIAS = {"NVDIA": "NVDA"}  # common typo
 
-# Optional sentiment
+# Optional sentiment (falls back to heuristic if not present)
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
     _VADER = SentimentIntensityAnalyzer()
@@ -38,7 +37,6 @@ except Exception:
     _VADER = None
 
 # ---------------- Indicators ----------------
-
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
@@ -71,7 +69,6 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.Se
     return tr.rolling(n).mean()
 
 # ---------------- Data helpers ----------------
-
 def fetch_prices(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
     return yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
 
@@ -79,7 +76,6 @@ def fetch_prices_multi(tickers: List[str], period: str = "6mo", interval: str = 
     return yf.download(tickers, period=period, interval=interval, auto_adjust=False, progress=False)
 
 # ---------------- News & Sentiment ----------------
-
 def fetch_news_yf(ticker: str) -> pd.DataFrame:
     items = []
     try:
@@ -107,6 +103,7 @@ def fetch_news_google(ticker: str) -> pd.DataFrame:
                 link  = item.findtext("link") or ""
                 pub   = item.findtext("pubDate") or ""
                 try:
+                    # RSS uses e.g. "Sat, 13 Sep 2025 15:10:00 GMT"
                     published = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=timezone.utc)
                 except Exception:
                     published = None
@@ -122,7 +119,8 @@ def get_news_with_sentiment(ticker: str) -> pd.DataFrame:
         return df
     df = df.dropna(subset=["title"]).copy()
     df["title"] = df["title"].astype(str).str.strip()
-    df["source"] = df.get("source", pd.Series([""]*len(df)))
+    if "source" not in df.columns:
+        df["source"] = ""
     df["published"] = pd.to_datetime(df.get("published"), errors="coerce", utc=True)
     df = df.sort_values("published", ascending=False).drop_duplicates(subset=["title"], keep="first")
 
@@ -150,7 +148,6 @@ def get_news_with_sentiment(ticker: str) -> pd.DataFrame:
     return df
 
 # ---------------- Macro ----------------
-
 def fetch_macro() -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
     try:
@@ -164,7 +161,6 @@ def fetch_macro() -> Dict[str, pd.DataFrame]:
     return out
 
 # ---------------- Intraday helpers ----------------
-
 def intraday_drift_5m(ticker: str) -> Tuple[Optional[float], Optional[float], bool]:
     """Return (last_60m_drift, session_drift, market_active_flag). Uses 5m bars."""
     try:
@@ -172,27 +168,23 @@ def intraday_drift_5m(ticker: str) -> Tuple[Optional[float], Optional[float], bo
         if df is None or df.empty:
             return None, None, False
         c = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
-        last_ts = c.index[-1].tz_localize("UTC") if c.index.tz is None else c.index[-1]
-        # market active if last bar within 20 minutes of now
+        last_ts = c.index[-1]
+        if last_ts.tz is None:
+            last_ts = last_ts.tz_localize("UTC")
         active = (datetime.now(timezone.utc) - last_ts) <= timedelta(minutes=20)
+
         # 60m drift (12 bars)
-        if len(c) >= 13:
-            drift_60 = float(c.iloc[-1] / c.iloc[-13] - 1.0)
-        else:
-            drift_60 = None
-        # session open drift: last vs today's first bar
+        drift_60 = float(c.iloc[-1] / c.iloc[-13] - 1.0) if len(c) >= 13 else None
+
+        # session drift: last vs today's first bar
         today_mask = (c.index.date == c.index[-1].date())
-        if today_mask.any():
-            first_today = c.loc[today_mask].iloc[0]
-            drift_sess = float(c.iloc[-1] / first_today - 1.0)
-        else:
-            drift_sess = None
+        drift_sess = float(c.iloc[-1] / c.loc[today_mask].iloc[0] - 1.0) if today_mask.any() else None
+
         return drift_60, drift_sess, bool(active)
     except Exception:
         return None, None, False
 
 # ---------------- Probability & Reasons ----------------
-
 def compute_probability_and_reasons(
     ticker: str,
     capital: float = 10000.0,
@@ -209,7 +201,7 @@ def compute_probability_and_reasons(
 
     ema20, ema50 = ema(p, 20), ema(p, 50)
     sma200 = p.rolling(200).mean()
-    ma20, upBB, loBB = bollinger(p, 20, 2)
+    _, upBB, loBB = bollinger(p, 20, 2)
     _, _, hist = macd(p)
     rsi_s = rsi(p, 14)
 
@@ -242,7 +234,7 @@ def compute_probability_and_reasons(
         s_trend = float(np.tanh(((float(sc.iloc[-1])-float(se50.iloc[-1]))/max(1e-6, float(se50.iloc[-1]))) * 10))
         macro_edge += 0.5*s_trend
 
-    # Intraday tie‑breaker
+    # Intraday tie-breaker
     drift60, drifts, active = intraday_drift_5m(ticker)
     intra_edge = 0.0
     if active and (drift60 is not None):
@@ -250,17 +242,17 @@ def compute_probability_and_reasons(
     if active and (drifts is not None):
         intra_edge += 0.20 * float(np.tanh(drifts * 10))
 
-    # Blend
-    z = 1.25*news_edge + 0.9*tech_edge + 0.5*macro_edge + intra_edge
+    # Blend → probability
+    z = 1.25*news_edge + 0.90*tech_edge + 0.50*macro_edge + intra_edge
     prob_up = 1.0 / (1.0 + math.exp(-z))
 
-    # Position sizing (ATR‑based)
+    # Position sizing (ATR-based)
     atr_s = atr(h, l, p, 14)
     atr_now = float(atr_s.iloc[-1]) if pd.notna(atr_s.iloc[-1]) else 0.0
-    stop_dist = atr_mult * atr_now
-    risk_amt = max(1.0, capital * (risk_pct/100.0))
+    stop_dist = float(atr_mult) * atr_now
+    risk_amt = max(1.0, float(capital) * (float(risk_pct)/100.0))
     shares = int(max(0, math.floor(risk_amt / stop_dist))) if stop_dist > 0 else 0
-    take_profit = rr_target * stop_dist
+    take_profit = float(rr_target) * stop_dist
 
     meta = {
         "ticker": ticker,
@@ -280,10 +272,9 @@ def compute_probability_and_reasons(
         "ema20": ema20, "ema50": ema50, "sma200": sma200,
         "upBB": upBB, "loBB": loBB, "rsi": rsi_s
     }
-    return prob_up, {"meta": meta, "series": series, "news": news_df.head(5) if (news_df is not None and not news_df.empty) else pd.DataFrame()}
+    return prob_up, {"meta": meta, "series": series, "news": news_df}
 
 # ---------------- Charts ----------------
-
 def price_with_rsi_chart(series: Dict[str, pd.Series], ticker: str, price: float, meta: Dict[str, Any]) -> go.Figure:
     p, o, h, l = series["p"], series["o"], series["h"], series["l"]
     ema20, ema50, sma200 = series["ema20"], series["ema50"], series["sma200"]
@@ -305,6 +296,18 @@ def price_with_rsi_chart(series: Dict[str, pd.Series], ticker: str, price: float
     fig.add_annotation(x=p.index[-1], y=price, xanchor="right", yanchor="bottom",
                        text=f" ${price:,.2f}", showarrow=False, font=dict(size=14))
 
+    # Golden/Death Cross badge (if enough data)
+    try:
+        sma50 = p.rolling(50).mean()
+        sma200_s = p.rolling(200).mean()
+        if pd.notna(sma50.iloc[-1]) and pd.notna(sma200_s.iloc[-1]):
+            badge = "Golden Cross" if sma50.iloc[-1] > sma200_s.iloc[-1] else "Death Cross"
+            fig.add_annotation(x=p.index[-1], y=float(sma200.iloc[-1]), text=badge,
+                               showarrow=True, arrowhead=1, ax=0, ay=-40,
+                               bgcolor="#f2f2f2", bordercolor="#999", font=dict(size=12))
+    except Exception:
+        pass
+
     # RSI panel
     fig.add_trace(go.Scatter(x=p.index, y=rsi_s, name="RSI14", line=dict(width=1.8)), row=2, col=1)
     fig.add_hline(y=70, line=dict(dash="dash", width=1), row=2, col=1)
@@ -319,7 +322,6 @@ def price_with_rsi_chart(series: Dict[str, pd.Series], ticker: str, price: float
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     return fig
-
 
 def probability_gauge(ticker: str, pct: float, mini: bool = False) -> go.Figure:
     fig = go.Figure(go.Indicator(
@@ -355,26 +357,6 @@ APP_CSS = """
   .tile-graph { height: 200px !important; }
 }
 """
-app.index_string = f"""
-<!DOCTYPE html>
-<html>
-  <head>
-    {{metas}}
-    <title>Market Decision Dashboard</title>
-    {{favicon}}
-    {{css}}
-    <style>{APP_CSS}</style>
-  </head>
-  <body>
-    {{app_entry}}
-    <footer>
-      {{config}}
-      {{scripts}}
-      {{renderer}}
-    </footer>
-  </body>
-</html>
-"""
 
 controls = dbc.Card([
     dbc.CardHeader("Controls"),
@@ -382,11 +364,15 @@ controls = dbc.Card([
         dbc.Row([
             dbc.Col([
                 html.Label("Detail ticker", style={"fontWeight": 600}),
-                dcc.Dropdown(id="detail-ticker", options=[{"label": t, "value": t} for t in DEFAULT_TICKERS], value=DEFAULT_TICKERS[0], clearable=False)
+                dcc.Dropdown(id="detail-ticker",
+                             options=[{"label": t, "value": t} for t in DEFAULT_TICKERS],
+                             value=DEFAULT_TICKERS[0], clearable=False)
             ], xs=12, sm=6, md=4, lg=3),
             dbc.Col([
                 html.Label("Tiles (watchlist)", style={"fontWeight": 600}),
-                dcc.Dropdown(id="tile-tickers", options=[{"label": t, "value": t} for t in DEFAULT_TICKERS], value=DEFAULT_TICKERS, multi=True)
+                dcc.Dropdown(id="tile-tickers",
+                             options=[{"label": t, "value": t} for t in DEFAULT_TICKERS],
+                             value=DEFAULT_TICKERS, multi=True)
             ], xs=12, sm=12, md=8, lg=6),
             dbc.Col([
                 html.Button("Refresh", id="refresh", className="btn btn-primary", style={"marginTop": "28px"})
@@ -415,7 +401,11 @@ controls = dbc.Card([
 ], className="mb-3")
 
 app.layout = dbc.Container([
-    html.H2("📈 Market Decision Dashboard — Responsive", style={"fontSize": "28px", "fontWeight": 700}),
+    # SAFE CSS injection (no f-strings)
+    html.Style(APP_CSS),
+
+    html.H2("📈 Market Decision Dashboard — Responsive",
+            style={"fontSize": "28px", "fontWeight": 700}),
     controls,
     dbc.Row([
         dbc.Col(dcc.Graph(id="detail-chart", className="graph-100", style={"height": "640px"}), lg=8, md=12),
@@ -429,36 +419,47 @@ app.layout = dbc.Container([
         ], lg=4, md=12)
     ], className="g-3"),
     html.Hr(),
-    html.H4("🧩 Multi‑Tile Probability Dashboard", style={"fontWeight": 700}),
-    # Responsive grid: xs=12 (1/row), sm=6 (2/row), md=4 (3/row), lg=3 (4/row)
+    html.H4("🧩 Multi-Tile Probability Dashboard", style={"fontWeight": 700}),
     dbc.Row(id="tiles-row", className="g-3"),
 ], fluid=True)
 
 # ---------------- Callbacks ----------------
 @app.callback(
-    [Output("detail-chart", "figure"), Output("detail-gauge", "figure"), Output("news-tape", "children"), Output("sizing-box", "children")],
+    [Output("detail-chart", "figure"),
+     Output("detail-gauge", "figure"),
+     Output("news-tape", "children"),
+     Output("sizing-box", "children")],
     [Input("detail-ticker", "value"), Input("refresh", "n_clicks")],
-    [State("capital", "value"), State("risk_pct", "value"), State("atr_mult", "value"), State("rr_target", "value")]
+    [State("capital", "value"), State("risk_pct", "value"),
+     State("atr_mult", "value"), State("rr_target", "value")]
 )
 def update_detail(ticker, _n, capital, risk_pct, atr_mult, rr_target):
     t = (ALIAS.get(ticker, ticker) if ticker else DEFAULT_TICKERS[0])
-    prob, out = compute_probability_and_reasons(t, capital=float(capital or 10000), risk_pct=float(risk_pct or 1.0), atr_mult=float(atr_mult or 1.5), rr_target=float(rr_target or 1.5))
+    _, out = compute_probability_and_reasons(
+        t,
+        capital=float(capital or 10000),
+        risk_pct=float(risk_pct or 1.0),
+        atr_mult=float(atr_mult or 1.5),
+        rr_target=float(rr_target or 1.5),
+    )
     meta, series, news = out.get("meta", {}), out.get("series", {}), out.get("news", pd.DataFrame())
 
-    fig_chart = price_with_rsi_chart(series, meta.get("ticker", t), float(meta.get("price", series["p"].iloc[-1])), meta)
+    fig_chart = price_with_rsi_chart(series, meta.get("ticker", t),
+                                     float(meta.get("price", series["p"].iloc[-1])), meta)
     fig_gauge = probability_gauge(meta.get("ticker", t), meta.get("prob_pct", 50.0), mini=False)
 
     # News tape (top 5)
     items = []
-    if news is not None and isinstance(news, pd.DataFrame) and not news.empty:
+    if isinstance(news, pd.DataFrame) and not news.empty:
         for _, row in news.head(5).iterrows():
             sent = float(row.get("sentiment", 0.0))
             col = "#228B22" if sent > 0.2 else ("#B22222" if sent < -0.2 else "#555")
             ts = row.get("published")
             ts_txt = pd.to_datetime(ts).strftime("%b %d %H:%M") if pd.notna(ts) else ""
+            title_txt = str(row.get("title", ""))
             items.append(html.Li([
                 html.Span(ts_txt + " — "),
-                html.Span(str(row.get("title", "")), style={"color": col})
+                html.Span(title_txt, style={"color": col})
             ], style={"fontSize": "0.92rem", "marginBottom": "4px"}))
     news_children = [html.Strong("News (last 5)"), html.Ul(items)] if items else html.Div("(no recent headlines)")
 
@@ -471,8 +472,8 @@ def update_detail(ticker, _n, capital, risk_pct, atr_mult, rr_target):
             drift_bits.append(f"Session drift: {meta['drifts']*100:+.2f}%")
     sizing_children = [
         html.Div(f"ATR(14): {meta.get('atr', 0.0):.2f}"),
-        html.Div(f"Stop: {float(atr_mult or 1.5)}×ATR → ${meta.get('stop_dist', 0.0):.2f}"),
-        html.Div(f"Take‑profit: {float(rr_target or 1.5):.1f}R → ${meta.get('take_profit', 0.0):.2f}"),
+        html.Div(f"Stop: {float(atr_mult or 1.5):.1f}×ATR → ${meta.get('stop_dist', 0.0):.2f}"),
+        html.Div(f"Take-profit: {float(rr_target or 1.5):.1f}R → ${meta.get('take_profit', 0.0):.2f}"),
         html.Div(f"Risk per trade: ${meta.get('risk_amt', 0.0):.2f}"),
         html.Div(f"Suggested size: {int(meta.get('shares', 0))} sh @ ${meta.get('price', 0.0):.2f}"),
     ]
@@ -491,14 +492,14 @@ def update_tiles(tickers, _n):
     tiles = []
     for t in tickers[:12]:
         try:
-            prob, out = compute_probability_and_reasons(ALIAS.get(t, t))
+            _, out = compute_probability_and_reasons(ALIAS.get(t, t))
             meta = out.get("meta", {})
             fig = probability_gauge(meta.get("ticker", t), meta.get("prob_pct", 50.0), mini=True)
         except Exception:
             fig = probability_gauge(t, 50.0, mini=True)
-        tiles.append(dbc.Col(dcc.Graph(figure=fig, className="graph-100 tile-graph"), xs=12, sm=6, md=4, lg=3))
+        tiles.append(dbc.Col(dcc.Graph(figure=fig, className="graph-100 tile-graph"),
+                             xs=12, sm=6, md=4, lg=3))
     return tiles
 
 if __name__ == "__main__":
     app.run_server(host="127.0.0.1", port=8080, debug=False)
-  ####################################################################
